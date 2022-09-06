@@ -1,0 +1,3223 @@
+---
+title: "2019/2022 Honors Bachelor's Thesis"
+author: "<b> NGUYEN THUY DUONG </b>"
+date: "4/15/2022"
+output: 
+   html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+```{r message=FALSE}
+# data processing 
+library(readxl)
+library(tidyverse)
+library(plyr)          # rbind
+library(dplyr)
+library(readr)
+library(purrr)
+library(skimr)
+
+# table & formatting
+library(kableExtra) 
+library(knitr)
+library(data.table)
+library(modelsummary)
+library(sjPlot)
+library(janitor)
+
+# visualization
+library(ggplot2)
+library(gridExtra)
+library(ggpubr)
+library(plotly)
+library(ggfortify)
+
+# data & regression
+library(here)
+library(psych)        # corPlot
+library(lares)
+library(plm)          # panel data
+library(lmtest)
+library(car)
+```
+
+---
+
+**PREFACE**
+
+This is an individual analysis conducted by **Nguyen Thuy Duong**, a final-year student undertaking an Honors Bachelor degree in Economics and Business Economics and a Dedicated minor in Applied Data Science at Utrecht University. The research question is **_The Impact of Green Innovations on Firm Value in the Biotech sector in Europe: A Path to Efficient and Sustainable Growth_**. The research is completed under the supervision of **Prof. dr. Wouter Botzen** and **PhD. Brian Colgan**.
+
+The analysis is organized as follows. The first section is data processing, including merging data sets and checking data quality. The data is explained and statistically described in Sections 2 and 3. Section 4 applies the Pooled OLS Fixed Effects Regressions to identify the relationship between the dependent variable, $Firm \ value$, and the explanatory variable, $Green \ innovation \ (GI)$. In this section, robustness checks are performed. While each section includes some explanations and sub-conclusions, key interpretations are provided in Section 6. Some of these conclusions are highlighted and linked to current literature and theories in the Word file.
+
+**Keywords**: Green innovation (GI), biotechnology, sustainable development, patent data, Fixed Effects Regression.
+
+---
+
+# Section I: Data Preparation
+
+## Patent Data
+
+```{r, message=FALSE}
+# Set path
+path = "C:/Users/HP/Documents/Utrecht University/UU 2021 - 2022/Thesis/Patent Application"
+
+# Compile all files
+patent <- list.files(path = path,
+                     pattern = "*.csv", 
+                     full.names = TRUE) %>%
+  lapply(read_csv) %>%
+  bind_rows()
+```
+
+```{r}
+# Rename columns
+names(patent)[1:3] <- c("Count", "Year", "Type")
+```
+
+```{r}
+# Create 'Age' & 'Location' variables & subsets 
+   # patent counts
+patent_counts <- patent %>% 
+  filter(Type == "Granted Patent") %>%
+  mutate(Age = Year - Establishment) %>%
+  separate(Firm_id, 
+           sep = "-", 
+           c( 'Firm', 'Location'), 
+           remove = F) %>% 
+  select(-c(Type, Establishment))
+
+   # patent applications
+patent_app <- patent %>% 
+  filter(Type == "Patent Application") %>%
+  mutate(Age = Year - Establishment) %>% 
+  select(-c(Type, Establishment))
+```
+
+---
+
+## Financial Data
+
+**Combine all sheets in Excel workbook**
+```{r}
+# Set path 
+path <- "C:/Users/HP/Documents/Utrecht University/UU 2021 - 2022/Thesis/EU Firm data"
+  
+# Set the working directory 
+setwd(path)
+  
+# Accessing all the sheets 
+sheet = excel_sheets("Financial_dta.xlsx")
+  
+# Applying sheet names to dataframe names
+data_list = lapply(setNames(sheet, sheet), 
+                    function(x) read_excel("Financial_dta.xlsx", sheet=x))
+
+# Compile all dataframes
+fin_data = bind_rows(data_list, .id="Sheet")
+```
+
+**Pivot data**
+```{r}
+# Rename columns
+names(fin_data)[1:2] <- c("Firm_id", "Feature")
+
+# Rrop unnecessary columns that contains sheet names
+fin_data <- fin_data[, 1:16]
+
+# Replace row values
+fin_data$Feature <- rep(c("Sales", "Sales_growth", "Gross_Income", "GIncome_growth", "Gross_margin", 
+                              "EBIT", "EBIT_growth", "EBIT_margin", "EBITDA", "EBITDA_growth",
+                              "EBITDA_margin", "Net_income", "NIncome_growth", "Net_margin", "Balance_sheet",
+                              "CSI", "CSI_growth", "CSI/TAssets", "Total_assets", "TA_growth", 
+                              "Asset_turnover", "ROA", "Total_debt", "Tdebt_growth", "Leverage", 
+                              "Tdebt/Tequity", "Net_debt", "Net_debt_growth", "Ndebt/Tequity", "Total_liab", 
+                              "Tliab_growth", "Tshare_equity", "TSE_growth", "Firm_value", "ROE"), 52)
+
+
+# Convert to panel data
+   # 'Year' columns into a single long column 
+finance <- pivot_longer(data = fin_data,
+                        cols = '2006':'2019',
+                        names_to = "Year",
+                        values_to = "Amount",
+                        values_drop_na = FALSE,
+                        names_repair = "minimal")  # accept duplicated names
+   # pivot wide
+finance <- pivot_wider(data = finance,
+                       names_from = Feature, 
+                       values_from = Amount)
+```
+
+**Relevant variables**
+```{r}
+# Keep relevant variables
+finance <- finance %>%
+   select(c("Firm_id", "Year","Firm_value", "Sales", "Sales_growth", 
+            "Total_assets", "Total_debt", "Leverage", 
+            "Tshare_equity", "ROA", "ROE"))
+```
+
+---
+
+## Merging Data
+   
+```{r}
+# Vertically merge
+merged <- merge(patent_counts, finance, by = c("Firm_id", "Year"))
+```
+
+**Missing values**
+
+   * Missing values exist, but at a small proportion (5.6%), meaning that removing them might not substantially affect the analysis results.
+   
+```{r}
+# Detecting NA using summary table
+summary(merged)
+
+# Compute proportion of missing values (~ 5.6%)
+sum(is.na(merged))/ (nrow(merged) * ncol(merged)) * 100
+```
+
+**Solutions**
+```{r}
+# Drop NA
+data <- merged[complete.cases(merged), ]
+
+# Variable classification & create new variables
+   # checking
+data.frame(lapply(data, class))
+
+   # 'Year' to numeric & new variables
+data <- data %>% mutate(Year = as.numeric(Year),
+                        Green_inn = log(1 + Count) %>% round(4),
+                        Size = log(Total_assets))%>% 
+   
+   # select & reorder relevant variables
+                 select(Firm_id, Firm, Year, Firm_value, Count, Green_inn, everything())
+```
+
+---
+
+# Section II: Data Description
+
+**Table of description**
+```{r}
+# Create a table
+table1 <- data.table(
+  '<b>Statistics' = c("Firm_value", "Count" , "Green_inn", "Age", "Sales", "Sale_growth",
+                      "Total_asset", "Total_debt", "Leverage", "Tshare_equity",
+                      "ROA", "ROE", "Size", "Location", "Year"),
+  
+  '<b>Variables' = c("Firm value", "Patent count", "Green innovation", "Firm age",
+                     "Annual sales", "Annual sales growth", "Total assets", "Total debt",
+                     "Leverage ratio", "Total shareholders' equity", "Return on Asset", 
+                     "Return on Equity", "Firm size", "Country", "Year"),
+  
+  '<b>Description' = c("Tobin’s q",
+                  "Number of patents granted",
+                  "Indicated by % change in number of patents",
+                  "The log value of operating years since the firm’s establishment",
+                  "The current operating income",
+                  "The rate of increase in annual sales",
+                  "Total amount of assets owned by the company",
+                  "Total amount of liabilities owned by the company",
+                  "Indicator of financial capability of the firms",
+                  "The shareholders' claim on assets after all debts owed are paid",
+                  "Indicator of profitability of the firm in relation to assets",
+                  "Indicator of profitability of the firm in relation to equity",
+                  "The log value of total asset",
+                  "Country of establishment: Sweden, Switzerland, England, France, 
+                   Denmark, Germany, Autria, Netherlands, Finland, Norway, Italy",
+                  "Research periods"),
+  
+  '<b>Mathematics' = c("Equity Market Value/ Equity Book Value",
+                  "",
+                  "Ln (1 + patent counts)",
+                  "Log (Research period – Establishment year)",
+                  "",
+                  "Current operating income - Previous year’s operating income)/(Previous year’s operating income",
+                  "",
+                  "",
+                  "Total Debt/Total Assets",
+                  "Total Assets - Total Debt",
+                  "Net profit/Total assets",
+                  "Net income/ Total shareholders' equity",
+                  "Log (Total Asset)",
+                  "SE, CH, GB, FR, DK, DE, AU, NL, FI, NO, IT",
+                  "2006, 2007, ..., 2019")
+  )
+
+# Format Description table 
+table1 <- kable(
+  x = table1, 
+  format = "html", 
+  size = 10,
+  escape = FALSE,
+  align = "llll",
+  caption = "<b>TABLE 1: <i>Data Description") %>%
+  
+  # styling
+  kable_classic(full_width = F, html_font = "calibri", position = "center") %>%
+  
+  # footnotes for table 
+  footnote(general = "All values, except for sales growth, are reported in thousand euros. Sales growth is reported in percentage.",
+  footnote_as_chunk = TRUE)
+
+  # save
+  save_kable(x = table1, file = "Table 1.png", zoom = 1.5)
+
+# Print table
+table1
+```
+
+---
+
+# Section III: Data Descriptives 
+
+This section statistically describes the data. The first sub-section provides a univariate analysis, including the statistical features and visualization of the distribution or frequency of individual variables. The second elaborates on the relationships between these variables.
+
+The summary table shows that there are some abnormal values in *ROA* and *ROE*, which will be shown in the distribution graphs. These values could be removed to ensure the quality of the data and analysis.
+
+```{r}
+# Statistics summary 
+summary(data)
+```
+
+---
+
+## Univariate analysis
+
+By visualizing the distribution of individual variables, differences between firms' characteristics (firm heterogeneity) and abnormal values are detected. Solutions to these outliers, if there are any, are suggested.
+
+```{r}
+# Setting global theme
+theme_set(theme_classic())
+```
+
+### Variable distribution
+
+**ROA & ROE**
+
+  + There exists extremely high, but few, data points of ROE. These are of Biorfrontera (2006) and Heidelpharma (2010). Since they are few compared to the total number of observations, they can be dropped out.
+
+```{r}
+grid.arrange(
+# ROA Distribution
+ggplot(data = data, aes(x = ROA)) + 
+   geom_density(col="blue") + 
+   geom_histogram(aes(y = ..density..), 
+                  colour = "black", fill = NA) +
+   labs(y = ""),
+
+# ROE Distribution
+ggplot(data = data, aes(x = ROE)) + 
+   geom_density(col="blue") + 
+   geom_histogram(aes(y = ..density..), 
+                  colour = "black", fill = NA) +
+   labs(y = ""),
+
+# Label figure
+nrow = 1, 
+top = text_grob("Density distribution",
+                color = "red", face = "bold", size = 12))
+```
+
+```{r}
+# Detect outliers
+as.data.frame(data %>% filter(ROE < -1000 | ROA < -150))
+```
+
+---
+
+**Data adjustment**
+
+  + After removing substantially different data points, both ROA and ROE are more equivalently distributed, as demonstrated in the below graph.
+  
+```{r}
+# Remove abnormal values
+data <- data %>% filter(ROE > -1000, ROA > -150)
+```
+
+**Save data**
+```{r}
+write.csv(data, "C:/Users/HP/Documents/Utrecht University/UU 2021 - 2022/Thesis/thesis_data.csv")
+```
+
+
+```{r}
+grid.arrange(
+   # ROA Distribution
+ggplot(data = data, aes(x = ROA)) + 
+   geom_density(col="blue") + 
+   geom_histogram(aes(y = ..density..), 
+                  colour = "black", fill = NA) +
+   labs(y = ""),
+
+   # ROE Distribution
+ggplot(data = data, aes(x = ROE)) + 
+   geom_density(col="blue") + 
+   geom_histogram(aes(y = ..density..), 
+                  colour = "black", fill = NA) +
+   labs(y = ""),
+
+# Label figure
+nrow = 1, 
+top = text_grob("Density distribution",
+                color = "red", face = "bold", size = 12))
+```
+
+```{r}
+# Distribution by firm & country
+   # ROA 
+p <- ggplot(data = data) + 
+   theme(legend.position = "none") + 
+         theme(plot.subtitle = element_text(hjust = 0.5, size = 9, 
+                                      face = "italic", colour = 'red'))
+
+p1 <- p + geom_boxplot(aes(y = ROA, color = Location))  +
+   labs(subtitle = "By country", y = "")
+
+p2 <- p + geom_boxplot(aes(y = ROA, color = Firm)) +
+   labs(subtitle = "By firm", y = "")
+
+pa <- ggarrange(p1, p2)
+
+annotate_figure(pa,  
+                top = text_grob("Return on Assets",
+                color = "red", face = "bold", size = 12))
+
+
+   # ROE 
+p1 <- p + geom_boxplot(aes(y = ROE, color = Location))  +
+   labs(subtitle = "By country", y = "")
+
+p2 <- p + geom_boxplot(aes(y = ROE, color = Firm)) +
+   labs(subtitle = "By firm", y = "")
+
+pe <- ggarrange(p1, p2)
+
+annotate_figure(pe,  
+                top = text_grob("Return on Equity",
+                color = "red", face = "bold", size = 12))
+```
+
+---
+
+**Location**
+```{r}
+# Distribution by country
+ggplot(data = data,
+       aes(x = Location)) +
+   geom_bar(aes(fill = Location)) +
+   labs(title = "Number of firms per country",
+        x = "", y = "") +
+   ylim(0, 150) +
+   geom_text(stat = 'count', aes(label = ..count..), vjust = -1) +
+   scale_fill_brewer(palette = "Set3") +
+   theme(legend.position = "none") + 
+   theme(plot.title = element_text(size = 12, hjust = .5, 
+                                   face = "bold", color = "red"))
+```
+
+---
+
+**Age**
+
+  + Firms can be segregated into two groups according to their age, which is calculated as the gap between the research year and the year of establishment (**Table 1**).
+
+    * Younger group is aged between $0 - 40$.
+   
+    * Older group is aged between $80 - 130$.
+
+  + Most biotech companies in France and Italy have a long history of establishment, whereas those located in other nations are recently founded.
+   
+  + Denmark is the only country where companies' ages vary significantly, ranging from 5 to 104 years old.
+   
+  + Roche (ROG-CH) is the only old firm exists in Switzerland, which explains the outliers in the 2nd boxplot.
+   
+```{r}
+# Distribution
+ggplot(data = data, aes(Age)) +
+   geom_density(col = "blue") + 
+   geom_histogram(aes(y = ..density..),
+                  color = 'black', fill = NA) +
+   labs(title = "Firm Age Distribution",
+        x = "", y = "") +
+   theme(legend.position = "none") + 
+   theme(plot.title = element_text(size = 12, hjust = .5, 
+                                   face = "bold", color = "red"))
+```
+
+```{r}
+# Distribution by country
+ggplot(data = data, aes(x = Location, y = Age, fill = Location)) +
+   geom_boxplot() +
+   labs(title = "Firm age by country",
+        x = "", y = "") +
+   scale_fill_brewer(palette = "Set3") +
+   theme(legend.position = "none") + 
+   theme(plot.title = element_text(size = 12, hjust = .5, 
+                                   face = "bold", color = "red"))
+```
+
+Outliers exist for CH (Switzerland). It is important to check why this happens. 
+
+```{r}
+data %>% 
+  filter(Location == "CH", Age > 100) %>% 
+  select(Firm_id, Age)
+```
+
+---
+
+**Firm Size & Total assets**
+
+  + The size of a firm is defined by the *Logarithm* of the *Total Assets* to address firm heterogeneity that some companies are much highly valued than the others. 
+
+```{r}
+p1 <- ggplot(data = data, aes(Total_assets)) + 
+   geom_density(col = "blue") +
+   geom_histogram(aes(y = ..density..),
+                  color = 'black', fill = NA) +
+      labs(subtitle = "Total assets",
+        x= "", y = "") +
+   theme(plot.subtitle = element_text(size = 9, hjust = 0.5, 
+                                      face = "italic", color = "red"))
+
+p2 <- ggplot(data = data, aes(Size)) + 
+   geom_density(col = "blue") +
+   geom_histogram(aes(y = ..density..),
+                  binwidth = 0.7, color = "black", fill = NA) +
+   labs(subtitle = "Log(Total Assets)", 
+        x= "", y = "") +
+   theme(plot.subtitle = element_text(size = 9, hjust = 0.5, 
+                                      face = "italic", color = "red"))
+
+p <- ggarrange(p1, p2)
+annotate_figure(p,  
+                top = text_grob("Firm size",
+                color = "red", face = "bold", size = 12))
+```
+
+---
+
+**Sales**
+
+  + Some companies had high sales at certain years. For example, Medivir (MVIR B-SE) experienced approximately $296$% increase in sales between 2013 and 2014, reaching $€194033.2$ (in thousands).
+
+```{r}
+# Sales distribution
+grid.arrange(
+
+ggplot(data = data, 
+       aes(y = Sales)) + 
+   geom_boxplot() + 
+   labs(subtitle = "Boxplot", 
+        x= "", y = "") +
+   theme(plot.subtitle = element_text(size = 9, hjust = 0.5, 
+                                      face = "italic", colour = 'red')),
+  
+ggplot(data = data, 
+       aes(Sales)) +
+   geom_density(col = "blue") +
+   geom_histogram(aes(y = ..density..), col = "black", fill = NA) + 
+   labs(subtitle = "Histogram", 
+        x= "", y = "") +
+   theme(plot.subtitle = element_text(size = 9, hjust = 0.5, 
+                                      face = "italic", colour = 'red')),
+
+nrow = 1,
+
+# Label figure
+top = text_grob("Firm sales (2016 - 2019)",
+                color = "red", face = "bold", size = 12))
+```
+
+```{r}
+# Detect firm(s) with unusual high sales
+data %>% filter(Sales > 100000)
+```
+
+---
+
+**Sales growth**
+
+  + As several firms had substantially high sales volumes at some years, their corresponding rates of increase in sales were also high, i.e., NICOX Sales growth in 2017.
+   
+```{r}
+# Rate of increase in sales 
+ggplot(data = data, aes(y = log(Sales_growth))) + 
+   geom_boxplot() + 
+   labs(title = "Log of sales growth (2006 - 2019)", 
+        x= "", y = "") +
+   theme(plot.title = element_text(hjust = 0.5, size = 12, 
+                                   face = "bold", colour = 'red'))
+```
+
+---
+
+**Leverage**
+
+  + Leverage ratios, indicated as profitability of the business, expose that research firms develop at different rates and make unequal profits.
+  
+```{r}
+grid.arrange(
+   # histogram
+   ggplot(data = data, aes(Leverage)) +
+      geom_density(col = "blue") +
+      geom_histogram(aes(y = ..density..), 
+                     color = "black", fill = "white") +
+      labs(subtitle = "Density plot", 
+           x= "", y = "") +
+      theme(plot.subtitle = element_text(hjust = 0.5, size = 9, 
+                                         face = "italic", colour = 'red')) +
+      theme(legend.position = "none"),
+
+   # boxplot
+   ggplot(data = data, aes(y = Leverage)) +
+      geom_boxplot(color = "black", fill = "white") +
+      labs(subtitle = "Boxplot", x= "", y = "") +
+      theme(plot.subtitle = element_text(hjust = 0.5, size = 9, 
+                                      face = "italic", colour = 'red')) +
+      theme(legend.position = "none"),
+
+   # label figure
+nrow = 1,
+top = text_grob("Leverage ratio", color = "red", 
+                face = "bold", size = 12))
+```
+
+---
+
+**Firm_value**
+  
+  + Businesses experienced negative value in certain periods. 
+  
+```{r}
+ggplot(data = data, aes(y = Firm_value)) + 
+   labs(title = "Distribution of firm value", 
+        x = "", y = "") +
+   geom_boxplot(color = 'black', fill = 'white') + 
+   theme(plot.title = element_text(hjust = 0.5, size = 12,
+                                   face = "bold", colour = 'red')) 
+```
+
+---
+
+**Patent**
+
+  + Patent counts vary significantly among firms, ranging from 0 to above 5,600 patents per year. This implies a high possibility of bias when using patent counts as an indicator of GI. 
+  
+  + To account for these differences, I employ the log change in patent counts, $log(1 + Count)$. I use parameter $1 + Count$ instead of $Count$ to avoid infinite $log(0)$.
+  
+  + Log transformation, as displayed in the second panel of *Patent distribution by country* figure, can help avoid data skewness bias.
+
+```{r}
+# Distribution
+  # patent count
+p1 <- ggplot(data = data, aes(y = Count)) + 
+   geom_boxplot(color = "black", fill = "white") +
+   ylim(0, 6000) +
+   labs(subtitle = "Count", y = "") +
+   theme(plot.subtitle = element_text(size = 9, hjust = 0.5, 
+                                      face = "italic", color = "red"))
+
+  # log of patent count
+p2 <- ggplot(data = data, aes(y = Green_inn)) + 
+   geom_boxplot(color = "black", fill = "white") +
+   labs(subtitle = "Log Count", y = "") +
+   theme(plot.subtitle = element_text(size = 9, hjust = 0.5, 
+                                      face = "italic", color = "red"))
+
+  # display plots
+p <- ggarrange(p1, p2)
+annotate_figure(p,  
+                top = text_grob("Patent distribution",
+                color = "red", face = "bold", size = 12))
+```
+
+```{r}
+# Distribution by country
+  # Patent count
+p1 <- ggplot(data = data, aes(y = Count)) + 
+   geom_boxplot(color = "black", aes(fill = Location)) +
+   ylim(0, 6000) + 
+   labs(subtitle = "Count",
+              y = "") + 
+   theme(legend.position = "none")
+
+  # Log of patent count
+p2 <- ggplot(data = data, aes(y = Green_inn)) + 
+   geom_boxplot(color = "black", aes(fill = Location)) +
+   labs(subtitle = "Log Count",
+              y = "") +
+   guides(fill=guide_legend(title=""))
+
+  # display plots
+p <- ggarrange(p1, p2)
+annotate_figure(p,  
+                top = text_grob("Patent distribution by country",
+                color = "red", face = "bold", size = 12))
+
+```
+
+```{r}
+# Distribution by firm
+  # patent count
+plot_ly(data, y = ~Count, color = ~Firm_id, 
+        type = 'box', colors = "Set1",  
+        showlegend = FALSE) %>%
+   layout(title = list(text = paste("<b>Patent count</b>",
+                                    '<br>',
+                                    '<sup>',
+                                    "By firm") ,
+                       font = list(size = 14, color = 'red')) ,
+          xaxis = list(title = "", showticklabels = FALSE),
+          yaxis = list (title = ""))
+
+  # log of patent count
+plot_ly(data, y = ~Green_inn, color = ~Firm_id,
+        type = 'box',  colors = "Set1", 
+        showlegend = FALSE) %>%
+   layout(title = list(text = paste("Green innovation",
+                                    '<br>',
+                                    '<sup>',
+                                    "(Log change in Patent count)"), 
+                       font = list(size = 14, color = 'red')),
+          xaxis = list(title = "", showticklabels = FALSE),
+          yaxis = list (title = ""))
+```
+
+---
+
+### Time frequency
+
+This subsection investigates how key variables change over time.
+
+**Sales**
+  
+  + Between 2006 and 2019, some firms experienced dramatic changes in sales volume whereas others expanded in a more stable trend.
+  
+```{r}
+ggplot(data = data, 
+       aes(x = Year, y = Sales, group = 1)) + 
+   geom_line() + 
+   labs(title = "Firm Sales (2006 - 2019)", 
+        x= "", y = "") +
+   theme(plot.title = element_text( size = 12, hjust = 0.5, 
+                                    face = "bold", colour = 'red')) +
+   facet_wrap(~ Firm_id)
+```
+
+---
+
+**Sales growth**
+
+  + Very great sales performance are observed in Cosmo Pharma (COX, France), and ImmuPharma (IMM, UK).
+
+  + When leaving out these peculiar values, the sales growth trend becomes more interpretable.  Consistent with previous observation that particular businesses achieved extensively high sales volumes, other companies grew at lower paces.
+  
+```{r}
+# Detect abnormal values
+plot_ly(data, x = ~Year, y = ~Sales_growth, color = ~Firm_id, 
+        type = 'scatter', mode = 'line', linetypes = "dashed",
+        text = ~ paste('Country: ', Location), 
+        colors = "Set2",  
+        showlegend = FALSE) %>%
+   layout(title = list(text = paste("<b>Sales growth</b>",
+                                    '<br>',
+                                    '<sup>',
+                                    "By firm") ,
+                       font = list(size = 14, face = "bold", color = 'red')) ,
+          xaxis = list(title = ""),
+          yaxis = list(title = ""))
+
+# After dropping substantially high sales volume growth
+  # distribution by firm
+plot_ly(data %>% filter(Sales_growth < 10000), 
+        x = ~Year, y = ~Sales_growth, color = ~Firm_id, 
+        type = 'scatter', mode = 'line', linetypes = "dashed",
+        text = ~ paste('Country: ', Location), 
+        colors = "Set2",  
+        showlegend = FALSE) %>%
+   layout(title = list(text = paste("<b>Sales growth</b>",
+                                    '<br>',
+                                    '<sup>',
+                                    "By firm (removing outliers)") ,
+                       font = list(size = 14, color = 'red')) ,
+          xaxis = list(title = ""),
+          yaxis = list (title = "", range(c(-1000, 6000))))
+```
+
+---
+
+**Firm sizes & Total assets**
+
+  + There is an upward trend in the firm size, meaning that firms expanded their total assets over time. It is also observable that some grew faster than others.
+  
+```{r}
+plot_ly(data, x = ~Year, y = ~Size, split = ~Firm,
+        type = 'scatter', mode = 'line', 
+        alpha = 0.8, linetypes = "dashed",
+        text = ~ paste('Country: ', Location),
+        showlegend = FALSE
+        ) %>%
+   layout(title = list(text = "<b>Changes in firm size</b>" ,
+                       font = list(size = 14, color = 'red')),
+          xaxis = list(title = ""),
+          yaxis = list (title = ""))
+```
+
+---
+
+**Leverage**
+  
+  + Leverage ratios fluctuate over time and do not follow the same pattern.
+  
+  + Firms have different leverage ratios, implying that they grow and make profits at different rates. This follows that some businesses are more profitable than others.
+  
+```{r}
+plot_ly(data, x = ~Year, y = ~Leverage, color = ~Firm_id,
+        type = 'scatter', mode = 'line', linetypes = "dashed",
+        text = ~ paste('Country: ', Location),
+        colors = "Set1", showlegend = FALSE) %>%
+   layout(title = list(text = paste("<b>Leverage ratio</b>",
+                                    '<br>',
+                                    '<sup>',
+                                    "(2006 - 2019 by firm)"), 
+                       font = list(size = 14, face = "bold", color = 'red')),
+          xaxis = list(title = ""),
+          yaxis = list(title = ""))
+```
+
+---
+
+**Firm value**
+  
+   + Biotechnology companies in the data set are significantly different in terms of economic values. Some incurred substantial losses, causing to negative firm value, whereas others successfully expanded.
+  
+```{r}
+ggplot(data = data, 
+       aes(x = Year, y = Firm_value)) + 
+   geom_line() + 
+   facet_wrap(~ Firm_id) +
+   labs(title = "Firm Value over time (2006 - 2019)", 
+        x = "", y = "") +
+   theme(plot.title = element_text(hjust = 0.5, size = 12, 
+                                   face = "bold", colour = 'red'))
+```
+
+---
+
+**Green innovation**
+
+  + Overall, firms are increasing their investments in green technology, as indicated by the upward trend in the percentage change of patent counts.
+  
+```{r}
+plot_ly(data, x = ~Year, y = ~Green_inn, color = ~Firm_id,
+        type = 'scatter', mode = 'line', linetypes = "dashed",
+        text = ~ paste('Country: ', Location),
+        colors = "Set1", showlegend = FALSE) %>%
+   layout(title = list(text = paste("<b>Green innovation</b>",
+                                    '<br>',
+                                    '<sup>',
+                                    "(Log change in Patents between 2006 - 2019 by firm)"), 
+                       font = list(size = 14, face = "bold", color = 'red')),
+          xaxis = list(title = ""),
+          yaxis = list(title = ""))
+```
+
+---
+
+## Multivariate analysis
+
+### Unit-level variation
+
+This section checks the differences in financial features and patents granted for individual countries and companies.
+
+  + Significant improvements in GI levels are recognized in the Netherlands ($\sigma = 2.54$), Sweden ($\sigma = 2.47$), England ($\sigma = 2.29$), France ($\sigma = 2.14$), Switzerland ($\sigma = 2.03$).
+  
+```{r}
+# Check for variation across 
+  # Countries
+data %>% 
+  group_by(Location) %>%
+  select(Count, Green_inn, Age, Sales, Sales_growth, Leverage, ROA, ROE, Size) %>%
+  summarise_all(sd)
+
+  # Firms
+data %>% 
+  group_by(Firm_id) %>%
+  select(Count, Green_inn, Age, Sales, Sales_growth, Leverage, ROA, ROE, Size) %>%
+  summarise_all(sd)
+```
+
+---
+
+### Variable correlation
+
+  + GI is negatively correlated to Firm value: $\rho$ _(Green\_inn, \  Firm\_value)_ $= -0.29$
+  
+  + Correlations between GI and ROA, ROE, Leverage ratios, which indicate the profitability of a business, are significantly positive. Examples are $\rho$ _(Green\_inn, \ ROA)_ = $0.22$, $\rho$ _(Green\_inn, \ ROE)_ = $0.13$, $\rho$ _(Green\_inn, \  Leverage)_ = $0.26$.
+
+**Correlation matrix**
+```{r} 
+cor_matrix <- data %>% 
+   select(-c(Firm_id, Firm, Location)) %>% 
+   cor()
+   # format to table
+data.table(cor_matrix)
+```
+
+---
+
+**Correlation plot**
+
+  + Significant codes: 0 ‘$***$’ 0.001 ‘$**$’ 0.01 ‘$*$’ 0.05 ‘$.$’ 0.1 ‘ ’.
+
+```{r}
+corPlot(data %>%
+   select(-c(Firm_id, Firm, Location)),
+   main = "Correlation",
+   cex = 0.6,
+   alpha = 0.6,
+   stars = TRUE,
+   cex.axis = 0.8,
+   xlas = 2)
+```
+
+---
+
+**Ranking correlations**
+
+  + Firm value is strongly correlated to Leverage ratio. Its association with GI is ranked as third strongest.
+  
+```{r}
+# All correlations
+  # top 10 couples of variables (by correlation coefficient) at 5% level
+data %>%
+   select(-c(Firm_id, Firm, Location)) %>%
+   corr_cross(max_pvalue = 0.05, top = 10)
+
+# Correlations with Firm_value
+  # top 5 most correlated variables to firm value
+data %>% 
+  corr_var(var = Firm_value, top = 5)
+```
+
+---
+
+## Statistics tables
+
+### Full sample statistics
+```{r}
+# Data frame containing statistics information
+table2 <- data.frame(describe(data %>%
+                                select(-c(Firm_id, Firm, Location))), 
+                     fast = TRUE)
+
+  # select information to display
+table2 <- table2 %>%
+  select(c(n, mean, sd, median, min, max)) %>% 
+  round(2) %>%
+  format()
+
+# Format the table
+table2 <- 
+  kable(table2, 
+      format = "html",
+      size = 10,
+      escape = FALSE,
+      align = "c",
+      caption = "<b>TABLE 2: <i>Administrative Data Statistical Summary",
+      col.names = c("<b>Observations", "<b>Mean", "<b>St. deviation", "<b>Median", "<b>Min", "<b>Max")) %>%
+  
+  # styling
+  kable_classic(full_width = F, html_font = "calibri", position = "left") %>%
+  
+  # footnotes for table 
+  footnote(general = "The table reports statistics of all available variables using the full sample.",
+  footnote_as_chunk = TRUE)
+  
+  # save table
+  save_kable(x = table2, file = "Table 2.png", zoom = 1.5)
+
+# Print table
+table2
+```
+
+---
+
+### Subgroup statistics
+
+**Create subgroups**
+```{r, results='hide', warning=FALSE}
+young_group <- data %>% filter(Age <= 50)
+old_group <- data %>% filter(Age > 50)
+```
+
+**Dataframe containing means and standard errors**
+```{r, results='hide', warning=FALSE}
+# Create a data frame
+table3 <- data.frame(NULL)
+desc_var <- c("Firm_value", "Count", "Green_inn",
+               "Age", "Sales", "Sales_growth", "Total_assets",
+               "Total_debt", "Leverage", "Tshare_equity", "ROA",
+               "ROE", "Size", "")
+
+# For-loop to assign values into data frame
+  # Full sample
+for(i in 1:14){
+  
+    # means of individual variables
+  mean <- mean(data[[desc_var[i]]])
+  
+    # standard errors of individual variables
+  sd <- sd(data[[desc_var[i]]])
+  
+    # number of observations
+  obs <- nrow(data)
+  
+    # assigning values to the table
+  table3[i, 1] <- mean
+  table3[i, 2] <- sd
+  table3[14, 1] <- obs
+  }
+
+  # Young group
+for (i in 1:14){
+  
+    # mean of the column 
+  mean <- mean(young_group[[desc_var[i]]])
+    
+    # standard errors of individual covariates
+  sd <- sd(young_group[[desc_var[i]]])
+  
+    # number of observations
+  obs <- nrow(young_group)
+    
+    # assigning values to the table
+  table3[i, 3] <- mean
+  table3[i, 4] <- sd
+  table3[14, 3] <- obs
+  }
+
+  # Old group
+for (i in 1:14){
+    
+    # mean of the column 
+  mean <- mean(old_group[[desc_var[i]]])
+    
+    # standard errors of individual covariates
+  sd <- sd(old_group[[desc_var[i]]])
+  
+    # number of observations
+  obs <- nrow(old_group)
+    
+   # assigning values to the table
+  table3[i, 5] <- mean 
+  table3[i, 6] <- sd
+  table3[14, 5] <- obs
+  }
+
+# Formatting
+
+  # renaming columns
+colnames(table3) <- c(
+  "<b>All", "", "<b>Young firms", "", "<b>Old firms")
+
+  # renaming rows
+rownames(table3) <- c("Firm value", "Patent count", "Green innovation", "Firm age",
+                      "Annual sales", "Annual sales growth", "Total assets", "Total debt", 
+                      "Leverage ratio", "Total Shareholders' Equity", "Return on Asset", 
+                      "Return on Equity", "Firm size", "Number of observations")
+
+  # round values
+table3 <- round(table3, 3)
+```
+
+**Translate into table**
+```{r}
+# Standard errors & means
+
+   # print standard errors below the means
+for (i in 1:13){
+  table3[i, 1] <- paste(
+    table3[i, 1], '<br>', '<sup>', "(", table3[i, 2],  ")", sep = ""
+    )
+  table3[i, 3] <- paste(
+    table3[i, 3], '<br>', '<sup>', "(", table3[i, 4], ")", sep = ""
+    )
+  table3[i, 5] <- paste(
+    table3[i, 5], '<br>', '<sup>', "(", table3[i, 6], ")", sep = ""
+    )
+}
+table3[, 1] <- linebreak(table3[, 1])
+table3[, 2] <- linebreak(table3[, 2])
+table3[, 3] <- linebreak(table3[, 3])
+
+  # remove columns of the standard errors 
+table3 <- table3[-c(2,4,6)]
+table3 
+
+# Formatting & Saving
+
+  # add headlines
+table3 <- table3 %>%
+    kable(
+      format = "html",
+      size = 10,
+      escape = FALSE,
+      caption = "<b>TABLE 3: <i>Descriptive Statistics",
+      align = "c") %>%
+    kable_classic(full_width = F, html_font = "calibri", position = "left") %>%
+    
+   # notify variable types
+    pack_rows("Dependent variable", 1, 1) %>%
+    pack_rows("Explanatory variable", 2, 3) %>%
+    pack_rows("Firm-specific features", 4, 14) %>%
+  
+   # footnotes for table 
+    footnote(general = "Table columns report means and standard deviations (shown in parentheses) of young and old firm samples compared to the full sample.",
+    footnote_as_chunk = TRUE)
+  
+   # save table
+    save_kable(x = table3, file = "Table 3.png", zoom = 1.5)
+
+# Print table
+table3
+```
+
+---
+
+# Section IV: Empirical Approach
+
+**Hypotheses**
+
+This analysis aims at testing 3 hypotheses:
+
+  + *Hypothesis 1:* Green innovation (GI) has a negative influence on firm value in the short-run.
+  
+  + *Hypothesis 2*: In the long run, GI can generate favorable outcomes to businesses.
+  
+  + *Hypothesis 3*: GI affects the economic performance of younger and older firms differently.
+  
+---
+
+**Significance level**  
+  
+This analysis chooses a general significance level of 10%. The significance of a variable can also be found by dividing its estimate by its standard error. Any coefficient that has a significance level at or below 10% is considered significant.
+
+---
+
+**Methodology**
+
+Both the Pooled OLS and Fixed Effects Regressions are employed in this section, with the emphasize being placed on the later estimator.  
+
+This analysis initially employs The **Pooled OLS** (*Pooled Ordinary Least Squares*), which can be simply defined as a Linear Regression estimator applied to Panel Data, to investigate the impact of GI on firm value. This metric works under two strict assumptions that, firstly, time-constant attributes are present and unbiased and, secondly, consistent estimate of variables are expected. However, this is unlikely to be the case due to high possibility of Omitted Variable Bias (OVB). For this reason, Fixed Effects Regression is later introduced to deal with the issue.
+
+I deploy **two-way effects** method for the **Fixed Effects Regression** as it can control for both time-specific and entity-specific effects. Unlike the Pooled OLS, this estimator can account for unobservable time-invariant factors, a key source of potential OVB. Examples for this type of bias are management quality, human resources’ ability. By allowing constants to vary within individual groups of research units, i.e., all observations for Roche Holding AG from 2006 to 2019, the effects of these attributes are mathematically removed and the coefficients of the variables of interested remain unaffected. Consequently, a less complicated equation is constructed and and reliable results are obtained.
+
+Bias can also come from observable factors, or heterogeneity among firms, i.e., sizes, growth rates, and profitability. These biases are can be easily eliminated by directly adding them into the regression model. As a results, Fixed Effect Regression method can be more efficient in dealing with OVB. 
+
+The regression procedure is described as follows. I perform the regressions, firstly, on the administrative data, and secondly add one-year and two-year lagged and leading values on the variables of interest to the models. The latter step helps to statistically test the second hypothesis regarding the long-term effects of GI. Similar procedures are applied to two age subgroups to determine the responsiveness of young and older companies to GI. Next, I investigate the deviations of the estimated coefficients of financial features and standard errors between models of different age groups to draw conclusions for the third hypothesis. If the coefficients are significantly different, there should be separate analyses for each group. Section V closes with robustness check methods regarding effectiveness of log transformation and Fixed Effects regression in handling different types of biases. Results are compared and explained in the next section. I will elaborate on the key findings in Section **VII. Results** of the word file.
+
+---
+
+**Model construction**
+
+The baseline model includes a dependent variable, **Firm_value**, and a regressor, **Green_inn**, while there are three extended models, which are simply the baseline model including multiple control variables. 
+
+While running the Pooled OLS Regression, I use **Anova()** function to determine which extended model performs the best, or in other words, which variables should be included in the extended equation. This model will later be used as the main extended model for further analysis using Fixed Effects Regression.
+
+---
+
+**Robustness check**
+
+The third part of this section presents 2 robustness checks on:
+
+  + **Data skewness**: Log transformation might not be able to fully eliminate biases. Therefore, it is important to inspect if excluding all abnormalities would affect the results. This check is conducted on cleaned data, which is original dataset excluding abnormalities (observations with over 4000 patents granted per year).
+  
+  + **Bias-control efficiency of Fixed Effects Regression**: Although Fixed Effects Regression can handle biases caused by both observable and unobservable variables, there is no certain indicator of how good this method can be. Therefore, I investigate how the coefficients of variables of interest change when several time-constant variables are included/excluded off the equation. Previous regression results are robust if the estimates are insensitive to the model specification, otherwise unreliable.
+
+---
+
+## List of models
+
+** Create a table**
+```{r}
+# Create a data frame containing indicators & model specifications
+table4 <- data.table(
+  
+  `<b>Models` = c("Baseline", "Extended", "Baseline", "Extended", ""),
+  
+  `<b>Short effects` = c("lm_base",
+                         "lm_ext1, lm_ext2, lm_ext3",
+                         "fix_base, young_base, old_base",
+                         "fix_ext, young_ex, old_ext"),
+  
+  `<b>Long effects` = c("",
+                        "lag1_base, lag2_base, lead1_base, lead2_base, lag1_ybase, lag2_ybase",
+                        "lead1_ybase, lead2_ybase, lag1_obase, lag2_obase, lead1_obase, lead2_obase",
+                        "lag1_ext, lag_2ext, lead1_ext, lead_2ext, lag1_yext, lag2_yext", 
+                        "lead1_yext, lead2_yext, lag1_oext, lag2_oext, lead1_oext, lead2_oext"))
+```
+
+**Translate into table**
+```{r}
+# Format table 
+kable(
+  x = table4, 
+  format = "html",
+  size = 10,
+  escape = FALSE,
+  caption = "<b>TABLE 4: <i>List of Regression Models",
+  align = "cll") %>%
+  kable_classic(full_width = F, html_font = "calibri", position = "left") %>%
+    
+  # notify variable rows
+  pack_rows("Pooled OLS", 1, 2, italic = TRUE) %>%
+  pack_rows("Fixed Effects", 3, 5, italic = TRUE) %>%
+  
+  # footnotes for table 
+  footnote(general = "lm_ext2 is selected as the main extended model in Fixed Effects Regression.",
+  number = c(
+    "'base' and 'ext' indicate baseline or extended models",
+    "'lag' and 'lead' indicate models with lagged or leading year(s)",
+    " 'y' and 'o' indicate age subgroups", 
+    "1/2: 1 or 2 years"))
+  
+  # save table
+  save_kable(x = "table4", file = "Table 4.png", zoom = 1.5)
+  
+# print table
+table4
+```
+
+---
+
+## Pooled OLS Regression
+
+### Baseline model
+
+  * GI tend to create negative values to the business: Firm value decreases by 0.03% per 1% increase in the number of patents.
+
+```{r}
+# Model
+lm_base <- lm(formula = Firm_value ~ Green_inn,
+              data = data)
+summary(lm_base)
+```
+
+```{r}
+# Visualization
+p <- ggplot(data, aes(Green_inn, Firm_value)) +
+   geom_point() 
+  
+  # linear model
+p1 <- p + geom_smooth() + labs(x = "", y = "Firm value")
+
+  # linear model smoothing
+p2 <- p + geom_smooth(method = "lm") +
+   labs(x = "", y = "")
+
+  # display plot
+p <- ggarrange(p1, p2)
+annotate_figure(p,  
+                top = text_grob("Green innovation & Firm value",
+                                color = "red", face = "bold", size = 12),
+                bottom = text_grob("GI index", size = 10))
+```
+
+---
+
+### Extended models
+
+ * GI can worsen economic performance of firms. Per 1% increase in GI, firm value can decrease by approximately 1.4%, ceteris paribus.
+ 
+```{r}
+# Adding control variables
+   # Base model + all control variables
+lm_ext1 <- lm(formula = Firm_value ~ Green_inn + Location + Age +
+                  Sales_growth + Leverage + Year + ROA + ROE + Size, 
+                data = data)
+
+   # extended model, - ROE
+lm_ext2 <- lm(formula = Firm_value ~ Green_inn + Location + Age +
+                 Sales_growth +  Leverage + Year + ROA + Size, 
+               data = data)
+
+   # extended model, - ROA
+lm_ext3 <- lm(formula = Firm_value ~ Green_inn + Location + Age +
+                  Sales_growth + Leverage + Year + ROE + Size, 
+               data = data)
+
+# Result summary
+modelsummary(list(lm_ext1, lm_ext2, lm_ext3))
+```
+
+---
+
+### Model comparison
+
+**Anova test**
+
+This is to test whether or not it is necessary to have both ROA and ROE into the models.
+
+If the resulting p-value is sufficiently low ($p\_value < 0.05$), the more complex model is significantly better than the simpler model, and thus favor the more complex model. If the p-value is not sufficiently low ($p\_value > 0.05$), the simpler model is favored.
+
+The *anova()* test shows that the baseline model including all variables except for ROE, *lm_ext2*,  performs the best, meaning that including ROE does not necessarily add explanatory power to the regression models. 
+
+  $$Firm\_value = \beta_0 + \beta_1 * Green\_inn + \epsilon$$
+  $$Firm\_value = \beta_0 + \beta_1 * Green\_inn + \sum \beta_n * Controls + \epsilon$$
+  
+Therefore, this analysis will mainly use the simple baseline model and the second extended model for further research.
+
+```{r}
+anova(lm_ext1, lm_ext2, lm_ext3)
+```
+
+---
+
+**Diagnostic plots**
+
+Diagnostic plots help to visually check if mathematical assumptions have been violated (homogeneity of variance) or whether the data contains outliers (Schweinberger, 2020). 
+
+There are three main residual plots, with each serving its own purposes:
+
+  + **Residuals:** The 3 plots in the first panel demonstrate the differences between the **observed** and **predicted** values produced by the regression equations. However, it is impossible to compare these residuals to those of other models as these residuals not standardized.
+  
+  + **Standardized Residuals**: The next 3 plots in the middle panel show the normalized residuals, which are computed by dividing the residuals by their standard deviation. Then, the normalized residuals can be plotted against the observed values.
+  
+    * In this way, not only are standardized residuals obtained, but the values of the residuals are transformed into z-values, and one can use the z-distribution to find problematic data points.
+    
+    * Rules of thumb:
+    
+      _(1)_ Points with values higher than 3.29 should be removed from the data.
+      
+      _(2)_ If more than 1% of the data points have values higher than 2.58, then the error rate of our model is too high.
+      
+      _(3)_ If more than 5% of the data points have values greater than 1.96, then the error rate of our model is too high.
+
+  + **Studentized residuals:** or also called adjusted predicted values (bottom panel). Although they also indicate the difference between the observed and predicted values, they are calculated in a way that allows us to identify influential data points.
+
+Two potentially problematic data points (the top-most and bottom-most point) are detected in the plots. These two points are observably different from the other data points and may therefore be outliers. We will test later if these points need to be removed.
+  
+```{r, fig.width=10}
+# Baseline model
+  # data frame containing Residuals
+df_base <- data.frame(id = 1:length(resid(lm_base)),
+                      residuals = resid(lm_base),
+                      standard = rstandard(lm_base),
+                      studend = rstudent(lm_base))
+
+  # generate plots
+p1 <- ggplot(df_base, aes(x = id, y = residuals)) + 
+  geom_point() +
+  labs(subtitle = "Baseline model", 
+       x = "", y = "Residuals") +
+    theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  theme(plot.subtitle = element_text(size = 9, hjust = 0.5, face = "italic"))
+
+p2 <- ggplot(df_base, aes(x = id, y = standard)) + 
+  geom_point() +
+  labs(x = "", y = "Standardized Residuals") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+p3 <- ggplot(df_base, aes(x = id, y = studend)) + 
+  geom_point() +
+  labs(x = "", y = "Studentized Residuals") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+
+# Extended model 2
+ # data frame containing Residuals
+df_extend <- data.frame(id = 1:length(resid(lm_ext2)),
+                        residuals = resid(lm_ext2),
+                        standard = rstandard(lm_ext2),
+                        studend = rstudent(lm_ext2))
+
+  # generate plots
+p4 <- ggplot(df_extend, aes(x = id, y = residuals)) + 
+  geom_point() +
+  labs(subtitle = "Extended baseline", 
+       x = "", y = "" ) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  theme(plot.subtitle = element_text(size = 9, hjust = 0.5, face = "italic"))
+
+p5 <- ggplot(df_extend, aes(x = id, y = standard)) + 
+  geom_point() +
+  labs(x = "", y = "") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) 
+
+p6 <- ggplot(df_extend, aes(x = id, y = studend)) + 
+  geom_point() +
+  labs(x = "", y = "") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+# Display plots
+p <- ggarrange(p1, p4, p2, p5, p3, p6, nrow = 3, ncol = 2)
+annotate_figure(p,  
+                top = text_grob("Model performance",
+                color = "red", face = "bold", size = 12),
+                bottom = text_grob("Index", size = 10))
+```
+
+---
+
+**Diagnostic plots (cont.)**
+(Schweinberger, 2020)
+
+  * **Residuals vs Fitted**: (upper left panel) detects outliers or determines the correlation between residuals and predicted values. This graph can help to remove data points that are too influential (outliers).
+  
+  * **Normal Q-Q**: (upper right panel) shows if the residuals are normally distributed (following a normal distribution). Observations 381, 243, 24 lie farther away from the dashed line, thus should be removed.
+  
+  * **Scale-Location**: tests for homoscedasticity, or whether or not the variance of the residuals remains constant and does not correlate with any independent variable. If there is a trend in the line, we are dealing with heteroscedasticity, that is, a correlation between independent variables and the residuals, which is very problematic for regressions. 
+  
+  This strengthens my agrument that the **Fixed Effect Regression** should be preferred to deal with time-inconsistant variables.
+  
+  * **Residuals vs Leverage:** shows Cook's distance value which is used as a measure of how strongly a data point affects the accuracy of the regression. If greater than 1, the data points are influentially problematic and thus should be dropped. Clearly, data points 381, 34, 152 disproportionately affect the regression.
+  
+```{r}
+# Extra diagnostic plots
+  # simple model
+autoplot(lm_base) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+
+  # extended model
+autoplot(lm_ext2) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+```
+
+---
+
+## Fixed Effects Regression
+
+**Methodology**
+
+The **plm()** command is used the in Fixed Effects Regression instead of the **lm()** since it is more computationally efficient, especially as the models become more complex.
+
+I firstly investigate the short term effects of GI on the economic performance of the researched units using the full sample. I then test the hypothesis that GI generates economic gains in the long run by using lags and leads of *1* and *2* years. Standard errors are shown in robust values. The same procedure is applied to subgroup samples to test the third hypothesis regarding the effects of GI on firms of different age groups.
+
+---
+
+### Full sample
+
+**I. Short run effects**
+
+  + In the baseline model, the coefficient on GI is positive, $5.6195$ ($s.e. = 1.7137$), and significant at $1$%. However, it becomes insignificant and decreases to $1.1263e+00$ ($s.e. = 1.3012e+00$) when adding control variables. 
+  
+  + Robust standard errors do not change much, implying that such a change is likely to be caused by explanatory power of control variables rather than random factors.
+
+```{r}
+# Baseline model
+fix_base <- plm(formula = Firm_value ~ Green_inn, 
+               data = data, 
+               index = c("Firm_id", "Year"), 
+               model = "within",
+               effect = "twoways")
+
+
+# Extended model
+fix_ext <- plm(formula = Firm_value ~ Green_inn + Location + Age +
+                 Sales_growth + Leverage + Year + ROA + Size,
+               data = data, 
+               index = c("Firm_id", "Year"), 
+               model = "within",
+               effect = "twoways")
+
+# Print results using robust standard errors
+coeftest(fix_base, vcov. = vcovHC, type = "HC1")
+coeftest(fix_ext, vcov. = vcovHC, type = "HC1")
+```
+
+---
+
+**II. Long run effects**
+
+  + Regardless of the influence of other factors, GI can create positive outcomes for companies in the near future. It can increase firm value by 4.6% per 1% increase in patent ownership after one year of technological development, as shown in the baseline equations $lag1\_ base$ (significant at 1% ) and $lead1 \_base$ (significant at 0.1%).
+  
+  + Nevertheless, when adding control variables, no significant coefficients are detected in both 1 and 2-year lag models. For example, GI estimate in 1-year lag model shrinks to  $1.8744e+00$ while standard errors do not vary, $s.e. = 1.5696$ and $s.e. = 1.7279$ respectively.
+  
+**Lagged years**
+```{r}
+# Baseline
+  # 1 year lag
+lag1_base <- plm(formula = Firm_value ~  lag(Green_inn, 1),
+                 data = data,
+                 index = c("Firm_id", "Year"),
+                 effect = "twoways",
+                 model = "within",
+                 na.action = na.exclude)
+
+  # 2 years lag
+lag2_base <- plm(formula = Firm_value ~ lag(Green_inn, 2),
+                 data = data,
+                 index = c("Firm_id", "Year"),
+                 effect = "twoways",
+                 model = "within",
+                 na.action = na.exclude)
+
+
+# Extended model
+  # 1 year lag
+lag1_ext <- plm(formula = Firm_value ~  lag(Green_inn, 1) + Location + Age +
+                 Sales_growth + Leverage + Year + ROA + Size,
+                 data = data,
+                 index = c("Firm_id", "Year"),
+                 effect = "twoways",
+                 model = "within",
+                 na.action = na.exclude)
+
+  # 2 years lag
+lag2_ext <- plm(formula = Firm_value ~ lag(Green_inn, 2) + Location + Age +
+                 Sales_growth + Leverage + Year + ROA + Size,
+                data = data,
+                index = c("Firm_id", "Year"),
+                effect = "twoways",
+                 model = "within",
+                 na.action = na.exclude)
+
+# Print results using robust standard errors
+coeftest(lag1_base, vcov. = vcovHC, type = "HC1")
+coeftest(lag1_ext, vcov. = vcovHC, type = "HC1")
+coeftest(lag2_base, vcov. = vcovHC, type = "HC1")
+coeftest(lag2_ext, vcov. = vcovHC, type = "HC1")
+```
+
+---
+
+**Years forwards**
+
+  + Similar results are found in the baseline models using leading value of firms as dependent variable. 
+  
+  + However, the extended lead models produce different outcomes from those of lags. Instead of showing no effects, they evidence that today's investments can bring marginal values in the future.
+  
+  + Models using 1 and 2-year leads produce relatively similar results: significant and positive coefficients. This strongly suggests that the increase in the firm value tomorrow can be explained by the growing rate of today's GI. 
+  
+  + For example, the baseline models, $lead1\_base$ and $lead2\_base$, create estimates of $4.6127$ ($s.e. = 1.7279$) and $4.7086$ ($s.e. = 1.9057$). Comparably, estimates of extended models, $lead1\_ext$ and $lead2\_ext$, are $3.4333e+00$ ($s.e. = 1.5799e+00$) and 4.7633e+00 ($s.e. = 1.8656e+00$) respectively. 
+  
+  $\implies$ In short, these results support to the second hypothesis that the long-run performance of a biotechnology company is positively constructed by its GI decisions.
+  
+```{r}
+# Baseline model
+  # 1 year leading 
+lead1_base <- plm(lead(Firm_value, 1) ~ Green_inn,
+                   data = data,
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+  # 2 years leading 
+lead2_base <- plm(lead(Firm_value, 2) ~ Green_inn,
+                   data = data, index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+# Extended model
+  # 1 year leading 
+lead1_ext <- plm(lead(Firm_value, 1) ~ Green_inn + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                   data = data, index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+  # 2 years leading 
+lead2_ext <- plm(lead(Firm_value, 2) ~ Green_inn + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                   data = data, index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+# Print results using robust standard errors
+coeftest(lead1_base, vcov. = vcovHC, type = "HC1")
+coeftest(lead1_ext, vcov. = vcovHC, type = "HC1")
+coeftest(lead2_base, vcov. = vcovHC, type = "HC1")
+coeftest(lead2_ext, vcov. = vcovHC, type = "HC1")
+```
+
+---
+
+**Sub-conclusions 1:**
+
+  + In the short run, no effects are detected for the whole sample. GI neither increases nor damages firm value.
+  
+  + In the long-run, GI possibly generates favorable outcomes to those who undertake the transition.
+
+---
+
+### Age subgroups
+
+Firms are segregated into two subsets according to their ages, named as $young\_group$ and $old\_group$. Regressions are performed with the Fixed Effects estimator only. However, it bears stressing that there is a large difference in the number of observations between the 2 samples. This follows that results should be interpreted with care.
+
+**I. Short run effects**
+
+**Young companies**
+
+  + A significant coefficient on GI is found in the baseline model using young group sample, which indicates that leveraging sustainable technology can have an immediate influence on the value of young enterprises. On average, per $1$% increase in  GI, a young bio-tech company can achieve a $5.6853$% increase in value in the same year.
+  
+```{r}
+# Baseline model
+young_base <- plm(formula = Firm_value ~ Green_inn, 
+               data = young_group, 
+               index = c("Firm_id", "Year"), 
+               model = "within",
+               effect = "twoways")
+
+# Extended model
+young_ext <- plm(formula = Firm_value ~ Green_inn + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+               data = young_group, 
+               index = c("Firm_id", "Year"), 
+               model = "within",
+               effect = "twoways")
+
+# Print results using robust standard errors
+coeftest(young_base, vcov. = vcovHC, type = "HC1")
+coeftest(young_ext, vcov. = vcovHC, type = "HC1")
+```
+
+---
+
+**Old companies**
+
+  + Older firms are not affected by their spending in GI shortly.
+  
+  + Their financial performance in a particular year can be heavily dependent on other finance-related factors, including leverage ratio, size, as evidenced by significant coefficients ($-9.6627e-01$, $5.9404e+00$ respectively). This relationship has been confirmed with their strong correlation, as demonstrated in **Section III. _Data Descriptives_**. 
+  
+```{r}
+# Baseline model
+old_base <- plm(formula = Firm_value ~ Green_inn, 
+               data = old_group, 
+               index = c("Firm_id", "Year"), 
+               model = "within",
+               effect = "twoways")
+
+# Extended model
+old_ext <- plm(formula = Firm_value ~ Green_inn + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+               data = old_group, 
+               index = c("Firm_id", "Year"), 
+               model = "within",
+               effect = "twoways")
+
+# Print results using robust standard errors
+coeftest(old_base, vcov. = vcovHC, type = "HC1")
+coeftest(old_ext, vcov. = vcovHC, type = "HC1")
+```
+
+---
+
+**II. Long run effects**
+
+**1. Lagged years**
+
+**Young companies**
+
+  + For 1-year lag, the coefficient  is positive ($4.7720$, $s.e. = 1.7981$) and significant at 1% but becomes insignificant as control variables are included ($1.9434e+00$, $s.e. = 1.9434e+00$).
+  
+  + For 2-year lag, GI estimate produced with the baseline equation is still statistically significant ($4.9344$), but at 5%. The extended equation produces a positive but insignificant estimate of $2.2639e+00$ ($s.e. = 1.9776$).
+  
+  $\implies$ In the long-run, GI might not matter to young companies.
+  
+```{r}
+# Baseline
+  # 1 year lag
+lag1_ybase <- plm(formula = Firm_value ~  lag(Green_inn, 1),
+                 data = subset(data, Age <=50),
+                 index = c("Firm_id", "Year"),
+                 effect = "twoways",
+                 model = "within",
+                 na.action = na.exclude)
+
+  # 2 years lag
+lag2_ybase <- plm(formula = Firm_value ~ lag(Green_inn, 2),
+                 data = subset(data, Age <=50),
+                 index = c("Firm_id", "Year"),
+                 effect = "twoways",
+                 model = "within",
+                 na.action = na.exclude)
+
+
+# Extended model
+  # 1 year lag
+lag1_yext <- plm(formula = Firm_value ~  lag(Green_inn, 1) + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                 data = subset(data, Age <=50),
+                 index = c("Firm_id", "Year"),
+                 effect = "twoways",
+                 model = "within",
+                 na.action = na.exclude)
+  
+  # 2 years lag
+lag2_yext <- plm(formula = Firm_value ~ lag(Green_inn, 2) + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                 data = subset(data, Age <=50),
+                 index = c("Firm_id", "Year"),
+                 effect = "twoways",
+                 model = "within",
+                 na.action = na.exclude)
+
+# Print results using robust standard errors
+coeftest(lag1_ybase, vcov. = vcovHC, type = "HC1")
+coeftest(lag1_yext, vcov. = vcovHC, type = "HC1")
+coeftest(lag2_ybase, vcov. = vcovHC, type = "HC1")
+coeftest(lag2_yext, vcov. = vcovHC, type = "HC1")
+```
+
+---
+
+**Old companies**
+
+  + In both 1-year or 2-year lag equations, the coefficients of GI are insignificant at all levels, meaning that GI do not contribute to the future value of older businesses.
+  
+  + Again, other financial factors tend to better explain the success of firms in this group, as mentioned in **Section IV. _4.3.1. Short-run effects_**.
+  
+```{r}
+# Baseline
+  # 1 year lag
+lag1_obase <- plm(formula = Firm_value ~  lag(Green_inn, 1),
+                 data = old_group,
+                 index = c("Firm_id", "Year"),
+                 effect = "twoways",
+                 model = "within",
+                 na.action = na.exclude)
+
+  # 2 years lag
+lag2_obase <- plm(formula = Firm_value ~ lag(Green_inn, 2),
+                 data = old_group,
+                 index = c("Firm_id", "Year"),
+                 effect = "twoways",
+                 model = "within",
+                 na.action = na.exclude)
+
+
+# Extended model
+  # 1 year lag
+lag1_oext <- plm(formula = Firm_value ~ lag(Green_inn, 1) + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                 data = old_group,
+                 index = c("Firm_id", "Year"),
+                 effect = "twoways",
+                 model = "within",
+                 na.action = na.exclude)
+  
+  # 2 years lag
+lag2_oext <- plm(formula = Firm_value ~ lag(Green_inn, 2) + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                 data = old_group,
+                 index = c("Firm_id", "Year"),
+                 effect = "twoways",
+                 model = "within",
+                 na.action = na.exclude)
+
+# Print results using robust standard errors
+coeftest(lag1_obase, vcov. = vcovHC, type = "HC1")
+coeftest(lag1_oext, vcov. = vcovHC, type = "HC1")
+coeftest(lag2_obase, vcov. = vcovHC, type = "HC1")
+coeftest(lag2_oext, vcov. = vcovHC, type = "HC1")
+```
+
+---
+
+**2. Leading years**
+  
+  + Baseline models of lags and leads produce the same inferences. However, extended models using leads show opposite results to those using lags.
+  
+**Young companies**
+
+  + GI estimates remain positive and significant at 0.01% (extended models) and 1% (baseline models). For example, $lead1\_ybase$ and $lead1\_yext$ estimates are $4.7720$ ($s.e. = 1.7981$) and $3.6078e+00$ ($s.e. = 1.6558e+00$), which are comparable to those produced with $lead2\_ybase$ and $lead2\_yext$, $4.9344$ ($s.e. = 1.9776$) and $4.9849e+00$ ($s.e. = 1.9582e+00$) respectively.
+  
+  + Looking at the largest effect, on average, per $1$% leverage in the eco-conscious innovation, business values of a young company can increase by approximately $4.98$%, ceteris paribus.
+  
+  $\implies$ The change in the performance of young biotechnology companies can be mainly attributed to sustainable technological development. This inference is supportive of the 2nd hypothesis concerning the long-run influence of GI.
+  
+```{r}
+# Baseline model
+  # 1 year leading 
+lead1_ybase <- plm(lead(Firm_value, 1) ~ Green_inn,
+                   data = young_group,
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+  # 2 years leading 
+lead2_ybase <- plm(lead(Firm_value, 2) ~ Green_inn,
+                   data = young_group, 
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+# Extended model
+  # 1 year leading 
+lead1_yext <- plm(lead(Firm_value, 1) ~ Green_inn + Location + Age +
+                    Sales_growth + Leverage + Year + ROA + Size,
+                   data = young_group, 
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+  # 2 years leading 
+lead2_yext <- plm(lead(Firm_value, 2) ~ Green_inn + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                   data = young_group, 
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+# Print results using robust standard errors
+coeftest(lead1_ybase, vcov. = vcovHC, type = "HC1")
+coeftest(lead1_yext, vcov. = vcovHC, type = "HC1")
+coeftest(lead2_ybase, vcov. = vcovHC, type = "HC1")
+coeftest(lead2_yext, vcov. = vcovHC, type = "HC1")
+```
+
+---
+
+**Old companies**
+
+  + Again, in no cases GI supplements or destroys value of longer-standing corporations. 
+  
+```{r}
+# Baseline model
+  # 1 year leading 
+lead1_obase <- plm(lead(Firm_value, 1) ~ Green_inn,
+                   data = old_group,
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+  # 2 years leading 
+lead2_obase <- plm(lead(Firm_value, 2) ~ Green_inn,
+                   data = old_group, 
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+# Extended model
+  # 1 year leading 
+lead1_oext <- plm(lead(Firm_value, 1) ~ Green_inn + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                   data = old_group, 
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+  # 2 years leading 
+lead2_oext <- plm(lead(Firm_value, 2) ~ Green_inn + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                   data = old_group, 
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+# Print results using robust standard errors
+coeftest(lead1_obase, vcov. = vcovHC, type = "HC1")
+coeftest(lead2_obase, vcov. = vcovHC, type = "HC1")
+coeftest(lead1_oext, vcov. = vcovHC, type = "HC1")
+coeftest(lead2_oext, vcov. = vcovHC, type = "HC1")
+```
+
+---
+
+**Sub-conclusions 2:**
+
+  + Outcomes are inconsistent between models of lag and leads on the young sample. Extended equations with lags report some insignificant but positive estimates of GI. In contrast, estimates of GI are consistently positive and significant across all equations with leads *(1)*. 
+  
+  + The impact of GI is more visible for younger businesses. GI can be constructive to this group in the long run.
+  
+  + In either type of equation, GI has no effect on older companies. However, it does not generate negative outcomes as expected in the first hypothesis *(2)*. Rather, other variables, namely $Leverage$ and $Size$ contribute much to this group's success.
+  
+  $\implies$ As results *(1)* and *(2)* are also found in regressions using full sample, it can be confirmed that GI does not have an adverse impact on biotechnology enterprises' value in short or long term.
+  
+---
+
+## Robustness Checks
+
+### Data skewness
+
+**Section III. _Data Descriptives_** demonstrates that the number of patents obtained by research companies varies dramatically, ranging from 0 to as high as 5,616 patents. I suspect that such a difference can cause bias that cannot be perfectly handled by log transformation. Therefore, I will remove all the observations with over 4,000 patents, then run the regressions using Fixed Effects estimator. The data set without outliers is named **cleaned data**. 
+
+  + Removing abnormalities slightly enhances the distribution of variable.
+  
+  + Estimates and standard errors produced with original data and cleaned data are relatively comparable. Hence, similar interpretations are obtained.
+
+  $\implies$ Log transformation can efficiently control for data skewness in the patent count variable and thus results are robust.
+  
+---  
+
+**Abnormalities removal**
+```{r}
+# Create a new dataset containing observations with at most 4,000 patents
+cleaned_data <- data %>% filter(Count <= 4000) %>% mutate(Green_inn = log(1 + Count))
+
+# Statistics of the new data set
+summary(cleaned_data)
+```
+
+**Variable distribution**
+
+  + The figures compare how $Green\_ innovation$ variable is distributed in cleaned data and original data. They show a slight improvement in its distribution.
+  
+```{r, fig.height=8}
+# Visualization of patent count
+par(mfrow = c(1, 2))
+boxplot(cleaned_data$Green_inn)
+boxplot(data$Green_inn)
+```
+
+---
+
+**Short-run effects regression**
+```{r}
+# Baseline model
+robust_base <- plm(Firm_value ~ Green_inn,
+                   data = cleaned_data,
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+# Extended model
+robust_ext <- plm(Firm_value ~ Green_inn + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                  data = cleaned_data,
+                  index = c("Firm_id", "Year"),
+                  effect = "twoways", model = "within",
+                  na.action = na.exclude)
+```
+
+**Long-run effects regression**
+```{r}
+# Lagged years
+  # lag 1 year
+lag1_rob_base <- plm(Firm_value ~ lag(Green_inn, 1),
+                   data = cleaned_data,
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+lag1_rob_ext <- plm(Firm_value ~ lag(Green_inn, 1) + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                  data = cleaned_data,
+                  index = c("Firm_id", "Year"),
+                  effect = "twoways", model = "within",
+                  na.action = na.exclude)
+  # lag 2 years
+lag2_rob_base <- plm(Firm_value ~ lag(Green_inn, 1),
+                   data = cleaned_data,
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+lag2_rob_ext <- plm(Firm_value ~ lag(Green_inn, 2) + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                  data = cleaned_data,
+                  index = c("Firm_id", "Year"),
+                  effect = "twoways", model = "within",
+                  na.action = na.exclude)
+
+# Leading years
+  # lead 1 year
+lead1_rob_base <- plm(lead(Firm_value, 1) ~ Green_inn,
+                   data = cleaned_data,
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+lead1_rob_ext <- plm(lead(Firm_value, 1) ~ Green_inn + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                   data = cleaned_data, 
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+  # lead 2 year
+lead2_rob_base <- plm(lead(Firm_value, 2) ~ Green_inn,
+                   data = cleaned_data,
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+
+lead2_rob_ext <- plm(lead(Firm_value, 2) ~ Green_inn + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + Size,
+                   data = cleaned_data, 
+                   index = c("Firm_id", "Year"),
+                   effect = "twoways", model = "within",
+                   na.action = na.exclude)
+```
+
+---
+
+**Results comparison**
+```{r}
+# Short-run effects
+coeftest(fix_base, vcov. = vcovHC, type = "HC1")
+coeftest(robust_base, vcov. = vcovHC, type = "HC1")
+
+coeftest(fix_ext, vcov. = vcovHC, type = "HC1")
+coeftest(robust_ext, vcov. = vcovHC, type = "HC1")
+
+# Long-run effects
+  # lagged values
+coeftest(lag1_base, vcov. = vcovHC, type = "HC1")
+coeftest(lag1_rob_base, vcov. = vcovHC, type = "HC1")
+
+coeftest(lag2_base, vcov. = vcovHC, type = "HC1")
+coeftest(lag2_rob_base, vcov. = vcovHC, type = "HC1")
+
+coeftest(lag1_ext, vcov. = vcovHC, type = "HC1")
+coeftest(lag1_rob_ext, vcov. = vcovHC, type = "HC1")
+
+coeftest(lag2_ext, vcov. = vcovHC, type = "HC1")
+coeftest(lag2_rob_ext, vcov. = vcovHC, type = "HC1")
+
+  # leading values
+coeftest(lead1_base, vcov. = vcovHC, type = "HC1")
+coeftest(lead1_rob_base, vcov. = vcovHC, type = "HC1")
+
+coeftest(lead2_base, vcov. = vcovHC, type = "HC1")
+coeftest(lead2_rob_base, vcov. = vcovHC, type = "HC1")
+
+coeftest(lead1_ext, vcov. = vcovHC, type = "HC1")
+coeftest(lead1_rob_ext, vcov. = vcovHC, type = "HC1")
+
+coeftest(lead2_ext, vcov. = vcovHC, type = "HC1")
+coeftest(lead2_rob_ext, vcov. = vcovHC, type = "HC1")
+```
+
+---
+
+### Estimator Effectiveness
+
+This test determines how reliable the Fixed Effects Regression results are in relative to Random Effects Regression. This is done by, firstly, comparing the coefficients and robust standard errors produced with the two models, and secondly, applying the Hausman test.
+
+The **Wallace-Hussain estimator** is adopted instead of the **Swamy-Arora RE model** (default) to perform the Two-ways Random Effects Regressions. This is because the second method uses 'within variance', which is not applicable or computable given the dataset. Conversely, the first method is more flexible and does not rely on the within variance. 
+
+Random Effects Regressions explores how GI influences firm's value in the same year using full sample and samples for two age groups of firms. Again, robust standard errors are reported.
+
+---
+
+**Random Effects Models**
+
+  + Except for models on the old companies, namely $rand\_obase$, $rand\_oext$, all other models produce negative, but insignificant, estimates of GI.
+  
+  + Most surprisingly, in the baseline model of the old sample, estimate of GI is  significantly positive ($2.4572$, $s.e. = 0.1385$), implying that old bio-based corporations can benefit from eco-conscious technological development. Specifically, $1$% increase in GI's level can leverage the financial performance of a long-standing biotech firm by approximately $2.45$%. This is opposite to the findings by Fixed Effects Regressions.
+  
+  + Turning to the extended models, no estimates are statistically significant, meaning that GI does not impact firms' value, regardless of their age group.
+  
+```{r}
+# Full sample
+  # baseline
+rand_base <- plm(formula = Firm_value ~ Green_inn, 
+               data = data, 
+               index = c("Firm_id", "Year"), 
+               model = "random",
+               effect = "twoways", 
+               random.method = "walhus")
+
+
+  # extended
+rand_ext <- plm(formula = Firm_value ~ Green_inn + Location + Age +
+                 Sales_growth + Leverage + Year + ROA + Size,
+               data = data, 
+               index = c("Firm_id", "Year"), 
+               model = "random",
+               effect = "twoways", 
+               random.method = "walhus")
+
+
+# Young sample
+  # baseline
+rand_ybase <- plm(formula = Firm_value ~ Green_inn, 
+               data = young_group, 
+               index = c("Firm_id", "Year"), 
+               model = "random",
+               effect = "twoways", 
+               random.method = "walhus")
+  # extended
+rand_yext <- plm(formula = Firm_value ~ Green_inn + Location + Age +
+                 Sales_growth + Leverage + Year + ROA + Size,
+               data = young_group, 
+               index = c("Firm_id", "Year"), 
+               model = "random",
+               effect = "twoways", 
+               random.method = "walhus" )
+
+# Old sample
+  # baseline
+rand_obase <- plm(formula = Firm_value ~ Green_inn, 
+               data = old_group, 
+               index = c("Firm_id", "Year"), 
+               model = "random",
+               effect = "twoways", 
+               random.method = "walhus")
+  # extended
+rand_oext <- plm(formula = Firm_value ~ Green_inn + Location + Age +
+                 Sales_growth + Leverage + Year + ROA + Size,
+               data = old_group, 
+               index = c("Firm_id", "Year"), 
+               model = "random",
+               effect = "twoways", 
+               random.method = "walhus" )
+
+
+# Print results using robust standard errors
+  # baseline
+coeftest(rand_base, vcov. = vcovHC, type = "HC1")
+coeftest(rand_ybase, vcov. = vcovHC, type = "HC1")
+coeftest(rand_obase, vcov. = vcovHC, type = "HC1")
+
+  # extended
+coeftest(rand_ext, vcov. = vcovHC, type = "HC1")
+coeftest(rand_yext, vcov. = vcovHC, type = "HC1")
+coeftest(rand_oext, vcov. = vcovHC, type = "HC1")
+```
+
+---
+
+**Hausman Test**
+
+The Hausman Test checks if the Fixed Effects Regression should be preferred to the Random Effects.
+
+  + Null hypothesis $H_0$: The preferred model is Random Effects; 
+  
+  + Alternate hypothesis $H_1$: The preferred model is Fixed Effects.
+
+**Decision rule**: Reject $H_0$ if p < (less than 0.05) in favor of $H_1$.
+
+Results:
+
+  + Both baseline and extended equations estimated with the Fixed Effects method are preferred. 
+  
+  $\implies$ It is reasonable to reject they null hypothesis that Random Effects Regression works better. This supports this analysis's method and previously discussed findings.
+
+```{r}
+# Compare baseline models in different samples
+phtest(rand_base, fix_base)
+phtest(rand_ybase, young_base)
+phtest(rand_obase, old_base)
+
+# Compare extended models in different samples
+phtest(fix_ext, rand_ext)
+phtest(young_ext, rand_yext)
+phtest(old_ext, rand_oext)
+```
+
+---
+
+**Sub-conclusions 3:**
+
+  + The Random Effects Estimator yields opposite results to the Fixed Effects Regression. Fixed Effects confirms that in the short-run, old companies are unaffected by GI, whereas the Random Effects method suggests a positive infuennce of GI on financial performances of long-established companies.
+  
+  + However, the Hausman test proves that the Fixed Effects estimator is more appropriate, it should be adopted as the key methodology for this analysis. Therefore, only findings by the Fixed Effects estimator are considered.
+  
+---
+
+# Section V: Results
+
+This section creates tables that summarize all the regression results. These tables will be presented in the main word file. Key findings are provided in the next section, some of which will be highlighted and further interpreted in the text document.
+
+## Pooled OLS Regression
+
+**Model summary**
+```{r}
+modelsummary(list("Basline" = lm_base, 
+                  "Extended" = lm_ext1, 
+                  "Extended - ROE" = lm_ext2, 
+                  "Extended - ROA" = lm_ext3),
+             output = "kableExtra")
+```
+
+**Translate into table**
+```{r}
+# Create a list containing all Pooled OLS models
+pooled_models <- c("Firm_value ~ Green_inn",
+                   "Firm_value ~ Green_inn + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + ROE + Size",
+                   "Firm_value ~ Green_inn + Location + Age +
+                   Sales_growth +  Leverage + Year + ROA + Size",
+                   "Firm_value ~ Green_inn + Location + Age +
+                   Sales_growth + Leverage + Year + ROE + Size")
+
+# Create a dataframe containing estimates and standard errors
+table5 <- data.frame(NULL)
+
+# For-loop to add values to the table
+for (i in 1:4) {
+  model <- lm(
+    formula = as.formula(paste(pooled_models[i])),
+    data = data)
+  
+  # extract coefficients
+  y1 <- coef(summary(model))[2, 1] %>% round(3)
+  # extract standard errors
+  y2 <- coef(summary(model))[2, 2] %>% round(3)
+  # number of observations
+  obs <- format(round(nobs(model), 0))
+  # significance levels
+  sig <- c("***")
+  
+  # assigning values to the table
+  table5[i, 1] <- y1         
+  table5[i, 2] <- y2         
+  table5[5, 1:2] <- obs
+  table5[i, 3] <- sig
+  table5[5, 3] <- ""
+}
+
+# Format table
+  # rename rows and columns
+colnames(table5) <- c("<b>Coefficients<b>", "<b>Standard errors<b>", "<b>Significance<b>")
+rownames(table5) <- c("GI",
+                   "GI + Location + Age +
+                   Sales_growth + Leverage + Year + ROA + ROE + Size",
+                   "GI + Location + Age +
+                   Sales_growth +  Leverage + Year + ROA + Size",
+                   "GI + Location + Age +
+                   Sales_growth + Leverage + Year + ROE + Size", 
+                   "<b>Observations<b>")
+
+  # styling table
+table5 <- kable(
+  x = table5,
+  format = "html",
+  size = 10, escape = FALSE,
+  caption = "<b>TABLE 5: <i>Pooled OLS Regression",
+  align = "c") %>%
+  kable_classic(full_width = F, html_font = "calibri", position = "left") %>%
+  
+  # notify variable columns
+  pack_rows("Model specifications", 1, 4, bold = TRUE) %>%
+  
+  # footnotes for table 
+  footnote(general = "The table reports the coefficients and stardard errors estimated with the Pooled OLS using the full sample. A variable is considered significant if the ratio between its coefficient and its standard error is equal to or greater than 2.",
+  footnote_as_chunk = TRUE)
+  
+  # save table
+  save_kable(x = table5, file = "Table 5.png", zoom = 1.5)
+table5
+```
+
+---
+
+## Fixed Effects Regression
+
+### Short-run
+
+**Create a table**
+```{r}
+# Create a list containing all Fixed Effects regression models
+short_run_models <- c("Firm_value ~ Green_inn", 
+                      "Firm_value ~ Green_inn + Location + Age + Sales_growth +
+                       Leverage + Year + ROA + Size")
+
+# Create a data frame containing estimates and standard errors
+table6 <- data.frame(NULL)
+```
+
+**Full sample**
+```{r}
+# For-loop to add values to the table
+for (i in 1:2) {
+  
+  model <- plm(
+    formula = as.formula(paste(short_run_models[[i]])),
+    data = data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table6[i, 1] <- y[1] %>% round(3)     
+  table6[i, 2] <- y[1, 2] %>% round(5)     
+}
+```
+
+**Young sample**
+```{r}
+# For-loop to add values to the table
+for (i in 1:2) {
+  
+  model <- plm(
+    formula = as.formula(paste(short_run_models[[i]])),
+    data = young_group, index = c("Firm_id", "Year"),  
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table6[i, 3] <- y[1] %>% round(3)     
+  table6[i, 4] <- y[1, 2] %>% round(5)     
+}
+```
+
+**Old sample**
+```{r}
+# For-loop to add values to the table
+for (i in 1:2) {
+  
+  model <- plm(
+    formula = as.formula(paste(short_run_models[[i]])),
+    data = old_group, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table6[i, 5] <- y[1] %>% round(3)     
+  table6[i, 6] <- y[1, 2] %>% round(5)      
+}
+```
+
+**Translate into table**
+```{r}
+# Format table
+  # for loops to place robust standard errors below the corresponding coefficients
+for (i in 1:4) {
+  for (k in seq(1, 6, 2)) {
+    
+  table6[i, k] <- paste(
+    table6[i, k], "<br>(",
+    table6[i, k +1], ")",
+    sep = "")
+  }
+}
+
+  # generate line breaks in the cell between the coefficient and standard error
+table6[, 1] <- linebreak(table6[, 1])
+table6[, 3] <- linebreak(table6[, 3])
+table6[, 5] <- linebreak(table6[, 5])
+
+  # remove columns displaying robust standard errors
+table6 <- table6 %>% select(-2, -4, -6) 
+
+  # removing any values from the cells that do not have any values
+table6 <- table6[1:2, ]
+
+  # add new columns reporting number of observations
+table6[3, ] <- c(nrow(data), nrow(young_group), nrow(old_group))
+
+  # naming the rows
+rownames(table6) <- c("GI", "GI + Controls", "<b>Observations<b>")
+colnames(table6) <- c("<b>Full sample<b>", "<b>Young<b>", "<b>Old<b>")
+
+  # styling table
+table6 <- kable(
+  x = table6,
+  format = "html",
+  size = 10, escape = FALSE,
+  caption = "<b>TABLE 6: <i> Short-run Effects of Green Innovation",
+  align = "c") %>%
+  kable_classic(full_width = F, html_font = "calibri", position = "left") %>%
+
+  # notify variable columns
+  # add_header_above(c( "Full sample" = 1, "Young" = 1, "Old" = 1), bold = TRUE) %>%
+
+  # notify variable rows
+  pack_rows("Baseline", 1, 1, bold = TRUE) %>%
+  pack_rows("Extended", 2, 2, bold = TRUE) %>%
+  
+  # footnotes for table 
+  footnote(general = "The table reports the Fixed Effects estimates in the same year of GI investment decisions. Robust standard errors are reported in parentheses. A variable is considered significant if the ratio between its coefficient and its standard error is equal to or greater than 2.",
+  footnote_as_chunk = TRUE)
+    
+  # save table
+save_kable(x = table6, file = "Table 6.png", zoom = 1.5)
+
+# print table
+table6
+```
+
+---
+
+### Long-run
+
+**Create a table**
+```{r}
+# Create a list of long-run effect models
+base_models <- c("Firm_value ~ lag(Green_inn, 1)",
+                 "Firm_value ~ lag(Green_inn, 2)",
+                 "lead(Firm_value, 1) ~ Green_inn",
+                 "lead(Firm_value, 2) ~ Green_inn",
+        
+                 "Firm_value ~ lag(Green_inn, 1)",
+                 "Firm_value ~ lag(Green_inn, 2)",
+                 "lead(Firm_value, 1) ~ Green_inn",
+                 "lead(Firm_value, 2) ~ Green_inn",
+        
+                 "Firm_value ~ lag(Green_inn, 1)",
+                 "Firm_value ~ lag(Green_inn, 2)",
+                 "lead(Firm_value, 1) ~ Green_inn",
+                 "lead(Firm_value, 2) ~ Green_inn")
+        
+ext_models <- c("Firm_value ~ lag(Green_inn, 1) + Location + Age + Year + 
+                Sales_growth + Leverage + ROA + Size",
+                "Firm_value ~ lag(Green_inn, 2) + Location + Age + Year +
+                Sales_growth + Leverage + ROA + Size",
+                "lead(Firm_value, 1) ~ Green_inn + Location + Age + Year +
+                Sales_growth + Leverage + ROA + Size",
+                "lead(Firm_value, 2) ~ Green_inn + Location + Age + Year +
+                Sales_growth + Leverage + ROA + Size",
+                
+                "Firm_value ~ lag(Green_inn, 1) + Location + Age + Year + 
+                Sales_growth + Leverage + ROA + Size",
+                "Firm_value ~ lag(Green_inn, 2) + Location + Age + Year +
+                Sales_growth + Leverage + ROA + Size",
+                "lead(Firm_value, 1) ~ Green_inn + Location + Age + Year +
+                Sales_growth + Leverage + ROA + Size",
+                "lead(Firm_value, 2) ~ Green_inn + Location + Age + Year +
+                Sales_growth + Leverage + ROA + Size",
+                
+                "Firm_value ~ lag(Green_inn, 1) + Location + Age + Year + 
+                Sales_growth + Leverage + ROA + Size",
+                "Firm_value ~ lag(Green_inn, 2) + Location + Age + Year +
+                Sales_growth + Leverage + ROA + Size",
+                "lead(Firm_value, 1) ~ Green_inn + Location + Age + Year +
+                Sales_growth + Leverage + ROA + Size",
+                "lead(Firm_value, 2) ~ Green_inn + Location + Age + Year +
+                Sales_growth + Leverage + ROA + Size")
+
+# Create a data frame to contain the results
+table7 <- data.frame(NULL)
+```
+
+**Baseline models**
+```{r}
+# For-loop to add values to the table
+  # Full sample
+for (i in 1:4) {
+  
+  model <- plm(
+    formula = as.formula(paste(base_models[[i]])),
+    data = data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table7[1, i] <- y[1] %>% round(3)     
+  table7[2, i] <- y[2] %>% round(4)     
+}
+
+  # Young sample
+for (i in 5:8) {
+  
+  model <- plm(
+    formula = as.formula(paste(base_models[[i]])),
+    data = young_group, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table7[1, i] <- y[1] %>% round(3)     # coef
+  table7[2, i] <- y[2] %>% round(4)     # std
+}
+
+  # Old sample
+for (i in 9:12) {
+  
+  model <- plm(
+    formula = as.formula(paste(base_models[[i]])),
+    data = old_group, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors 
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table7[1, i] <- y[1] %>% round(3)     # coef
+  table7[2, i] <- y[2] %>% round(4)     # std
+}
+```
+
+**Extended models**
+```{r}
+# For-loop to add values to the table
+  # Full sample
+for (i in 1:4) {
+  
+  model <- plm(
+    formula = as.formula(paste(ext_models[[i]])),
+    data = data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors & number of observations
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  obs <- nobs(model)
+  
+  # assigning values to the table
+  table7[3, i] <- y[1] %>% round(3)     
+  table7[4, i] <- y[2] %>% round(5)  
+  table7[5, i] <- obs
+}
+
+  # Young sample
+for (i in 5:8) {
+  
+  model <- plm(
+    formula = as.formula(paste(ext_models[[i]])),
+    data = young_group, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  obs <- nobs(model)
+  
+  # assigning values to the table
+  table7[3, i] <- y[1] %>% round(3)     # coef
+  table7[4, i] <- y[2] %>% round(5)     # std
+  table7[5, i] <- obs
+}
+
+  # Old sample
+for (i in 9:12) {
+  
+  model <- plm(
+    formula = as.formula(paste(ext_models[[i]])),
+    data = old_group, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors & number of observations
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  obs <- nobs(model)
+  
+  # assigning values to the table
+  table7[3, i] <- y[1] %>% round(3)     
+  table7[4, i] <- y[2] %>% round(5)     
+  table7[5, i] <- obs
+}
+```
+
+**Translate into table**
+```{r}
+# Format table
+  # for loops to place robust standard errors below the corresponding coefficients
+for (i in 1:12) {
+  
+  table7[1, i] <- paste(
+    table7[1, i], "<br>(",
+    table7[2, i], ")",
+    sep="")
+  
+  table7[3, i] <- paste(
+    table7[3, i], "<br>(",
+    table7[4, i], ")",
+    sep="")
+}
+
+  # remove duplicate rows displaying robust standard errors
+table7 <- table7[c(1, 3, 5), ]
+
+  # naming rows & columns
+rownames(table7) <- c("GI", "GI + Controls", "<b>Observations<b>")
+colnames(table7) <- rep(c("(1)", "(2)"), times = 6)
+
+  # styling table
+table7 <- kable(
+  x = table7,
+  format = "html",
+  size = 10, escape = FALSE,
+  caption = "<b>TABLE 7: <i>Long-run effects of Green Innovation",
+  align = "c") %>%
+  kable_classic(full_width = F, html_font = "calibri", position = "left") %>%
+
+  # notify variable columns
+  add_header_above(c("", "Lag" = 2, "Lead" = 2, "Lag" = 2, 
+                     "Lead" = 2, "Lag" = 2, "Lead" = 2), bold = TRUE) %>%
+  add_header_above(c("", "Full sample" = 4, "Young" = 4, "Old" = 4), bold = TRUE) %>%
+
+  # notify variable rows
+  pack_rows("Baseline", 1, 1, bold = TRUE) %>%
+  pack_rows("Extended", 2, 2, bold = TRUE) %>%
+  
+  # footnotes for table 
+  footnote(general = "The table reports the Fixed Effects estimates using (1) or (2) years of lagged or leading values of variables of interest. Robust standard errors are reported in parentheses. A variable is considered significant if the ratio between its coefficient and its standard error is equal to or greater than 2.",
+  footnote_as_chunk = TRUE)
+    
+  # save table
+save_kable(x = table7, file = "Table 7.png", zoom = 1.5)
+
+# print table
+table7
+```
+
+---
+
+## Robustness Checks
+
+### Data skewness
+
+**Create a table**
+```{r}
+# Create a data frame containing estimates and standard errors
+table8 <- data.frame(NULL)
+```
+
+**Short-run effects**
+```{r}
+# For-loop to add values to the table
+  # original data
+for (i in 1) {
+  
+  model <- plm(
+    formula = "Firm_value ~ Green_inn",
+    data = data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  obs <- nobs(model)
+  
+  # assigning values to the table
+  table8[i, 1] <- y[1] %>% round(3)  
+  table8[i, 2] <- y[2] %>% round(3) 
+  table8[3, 1] <- obs
+}
+
+  # cleaned data
+for (i in 1) {
+  
+  model <- plm(
+    formula = "Firm_value ~ Green_inn",
+    data = cleaned_data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table8[i, 3] <- y[1] %>% round(3)    
+  table8[i, 4] <- y[2] %>% round(3)
+  table8[3, 3] <- obs
+}
+```
+
+**Long run effects**
+```{r}
+# Create lists of models estimating long-run effects of GII
+  # models with lags
+lag_base <- c("Firm_value ~ lag(Green_inn, 1)",
+                 "Firm_value ~ lag(Green_inn, 2)")
+lag_ext <- c("Firm_value ~ lag(Green_inn, 1) + Location + Age + Year + 
+             Sales_growth + Leverage + ROA + Size",
+             "Firm_value ~ lag(Green_inn, 2) + Location + Age + Year +
+             Sales_growth + Leverage + ROA + Size")
+
+  # models with leads
+lead_base <- c("lead(Firm_value, 1) ~ Green_inn",
+                 "lead(Firm_value, 2) ~ Green_inn")
+lead_ext <- c("lead(Firm_value, 1) ~ Green_inn + Location + Age + Year +
+                Sales_growth + Leverage + ROA + Size",
+                "lead(Firm_value, 2) ~ Green_inn + Location + Age + Year +
+                Sales_growth + Leverage + ROA + Size")
+```
+
+**i. Models with lags**
+```{r}
+# For-loop to add values to the table
+# Baseline
+  ## (1) original data
+for (i in 1:2) {
+  
+  model <- plm(
+    formula = as.formula(paste(lag_base[[i]])),
+    data = data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors & number of observations
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table8[i, 5] <- y[1] %>% round(3)     
+  table8[i, 6] <- y[2] %>% round(3)
+  table8[3, 5] <- obs
+}
+
+  ## (2) cleaned data
+for (i in 1:2) {
+  
+  model <- plm(
+    formula = as.formula(paste(lag_base[[i]])),
+    data = cleaned_data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table8[i, 7] <- y[1] %>% round(3)    
+  table8[i, 8] <- y[2] %>% round(5)   
+  table8[3, 7] <- obs
+}
+
+  # Extended models
+  ## (1) original data
+for (i in 1:2) {
+  
+  model <- plm(
+    formula = as.formula(paste(lag_ext[[i]])),
+    data = data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors & number of observations
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table8[i, 9] <- y[1] %>% round(3)     
+  table8[i, 10] <- y[2] %>% round(5) 
+  table8[3, 9] <- obs
+}
+
+  ## (2) cleaned data
+for (i in 1:2) {
+  
+  model <- plm(
+    formula = as.formula(paste(lag_ext[[i]])),
+    data = cleaned_data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table8[i, 11] <- y[1] %>% round(3)    
+  table8[i, 12] <- y[2] %>% round(5) 
+  table8[3, 11] <- obs
+}
+```
+
+**ii. Models with leads**
+```{r}
+# For-loop to add values to the table
+# Baseline
+  ## (1) original data
+for (i in 1:2) {
+  
+  model <- plm(
+    formula = as.formula(paste(lead_base[[i]])),
+    data = data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors & number of observations
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table8[i, 13] <- y[1] %>% round(3)     
+  table8[i, 14] <- y[2] %>% round(3) 
+  table8[3, 13] <- obs
+}
+
+  ## (2) cleaned data
+for (i in 1:2) {
+  
+  model <- plm(
+    formula = as.formula(paste(lead_base[[i]])),
+    data = cleaned_data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table8[i, 15] <- y[1] %>% round(3)    
+  table8[i, 16] <- y[2] %>% round(5)  
+  table8[3, 15] <- obs
+}
+
+# Extended models
+  ## (1) original data
+for (i in 1:2) {
+  
+  model <- plm(
+    formula = as.formula(paste(lead_ext[[i]])),
+    data = data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors & number of observations
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table8[i, 17] <- y[1] %>% round(3)     
+  table8[i, 18] <- y[2] %>% round(5)  
+  table8[3, 17] <- obs
+}
+
+  ## (2) cleaned data
+for (i in 1:2) {
+  
+  model <- plm(
+    formula = as.formula(paste(lead_ext[[i]])),
+    data = cleaned_data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table8[i, 19] <- y[1] %>% round(3)    
+  table8[i, 20] <- y[2] %>% round(5) 
+  table8[3, 19] <- obs
+}
+```
+
+**Translate into table**
+```{r}
+# Format table
+
+  # for loops to place robust standard errors below the corresponding coefficients
+for (i in 1:2) {
+  for (k in seq(1, 20, 2)) {
+    
+  table8[i, k] <- paste(
+    table8[i, k], "<br>(",
+    table8[i, k + 1], ")",
+    sep="")
+  }
+}
+
+  # remove duplicate rows displaying robust standard errors
+table8 <- table8[-seq(2, 20, 2)]
+
+  # remove NA values
+table8[2, 1:2] <- " "
+ 
+  # name the rows
+colnames(table8) <- rep(c("Original", "Cleaned"), times = 5)
+rownames(table8) <- c("GI", "GI + Controls", "<b>Observations<b>")
+
+  # styling table
+table8 <- kable(
+  x = table8,
+  format = "html",
+  size = 10, escape = FALSE,
+  caption = "<b>TABLE 8: <i>Robustness check - Data skewness & Log transformation",
+  align = "c") %>%
+  kable_classic(full_width = F, html_font = "calibri", position = "left") %>%
+
+  # notify variable columns
+  add_header_above(c("", "", "", "(1)" = 2, "(2)" = 2, "(1)" = 2, "(2)" = 2), 
+                   bold = TRUE) %>%
+  add_header_above(c("", "", "", "Lag" = 4,  "Lead" = 4), bold = TRUE) %>%
+  add_header_above(c("", "Short-run" = 2, "Long-run" = 8), 
+                   bold = TRUE) %>%
+
+  # notify variable rows
+  pack_rows("Baseline", 1, 1, bold = TRUE) %>%
+  pack_rows("Extended", 2, 2, bold = TRUE) %>%
+  
+  # footnotes for table 
+  footnote(general = "The table reports the estimates and robust standard errors using Original data and Cleaned data. The Cleaned data is the Original data excluding observations with over 4000 patent counts. A variable is considered significant if the ratio between its coefficient and its standard error is equal to or greater than 2.",
+  footnote_as_chunk = TRUE)
+    
+  # save table
+save_kable(x = table8, file = "Table 8.png", zoom = 1.5)
+
+# print table
+table8
+```
+
+---
+
+### Random & Fixed Effects
+
+**Create a table**
+```{r}
+# Create a list of models
+base_model <- c("Firm_value ~ Green_inn")
+        
+ext_model <- c("Firm_value ~ Green_inn + Location + Age + Year + 
+                Sales_growth + Leverage + ROA + Size")
+
+# Create a data frame to contain the results
+table9 <- data.frame(NULL)
+```
+
+**Baseline models**
+```{r}
+# For-loop to add values to the table
+  # Full sample
+  ## (1) fixed
+for (i in 1) {
+  
+  model <- plm(
+    formula = as.formula(paste(base_model)),
+    data = data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors 
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table9[i, 1] <- y[1] %>% round(3)  
+  table9[i, 2] <- y[2] %>% round(3)  
+}
+
+  ## (2) random 
+for (i in 1) {
+  
+  model <- plm(
+    formula = as.formula(paste(base_model)),
+    data = data, index = c("Firm_id", "Year"), 
+    model = "random", effect = "twoways", 
+    random.method = "walhus")
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table9[i, 3] <- y[2] %>% round(3)    
+  table9[i, 4] <- y[2, 2] %>% round(3) 
+}
+
+  # Young sample
+  ## (1) fixed
+for (i in 1) {
+  
+  model <- plm(
+    formula = as.formula(paste(base_model)),
+    data = young_group, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors & number of observations
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table9[i, 5] <- y[1] %>% round(3)  
+  table9[i, 6] <- y[2] %>% round(3)    
+}
+
+  ## (2) random 
+for (i in 1) {
+  
+  model <- plm(
+    formula =as.formula(paste(base_model)),
+    data = young_group, index = c("Firm_id", "Year"), 
+    model = "random", effect = "twoways", 
+    random.method = "walhus")
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table9[i, 7] <- y[2] %>% round(3)    
+  table9[i, 8] <- y[2, 2] %>% round(3) 
+}
+
+  # Old sample
+  ## (1) fixed
+for (i in 1) {
+  
+  model <- plm(
+    formula = as.formula(paste(base_model)),
+    data = old_group, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors & number of observations
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+
+  # assigning values to the table
+  table9[i, 9] <- y[1] %>% round(3)  
+  table9[i, 10] <- y[2] %>% round(3) 
+}
+
+  ## (2) random 
+for (i in 1) {
+  
+  model <- plm(
+    formula = as.formula(paste(base_model)),
+    data = old_group, index = c("Firm_id", "Year"), 
+    model = "random", effect = "twoways", 
+    random.method = "walhus")
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table9[i, 11] <- y[2] %>% round(3)    
+  table9[i, 12] <- y[2, 2] %>% round(3)    
+}
+```
+
+**Extended models**
+```{r}
+# For-loop to add values to the table
+  # Full sample
+  ## (1) fixed
+for (i in 2) {
+  
+  model <- plm(
+    formula = as.formula(paste(ext_model)),
+    data = data, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors & number of observations
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  obs <- nobs(model)
+  
+  # assigning values to the table
+  table9[i, 1] <- y[1] %>% round(3)  
+  table9[i, 2] <- y[2] %>% round(5) 
+  table9[3, 1:2] <- obs
+}
+
+  ## (2) random 
+for (i in 2) {
+  
+  model <- plm(
+    formula = as.formula(paste(ext_model)),
+    data = data, index = c("Firm_id", "Year"), 
+    model = "random", effect = "twoways", 
+    random.method = "walhus")
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table9[i, 3] <- y[2] %>% round(3)    
+  table9[i, 4] <- y[2, 2] %>% round(3) 
+  table9[3, 3:4] <- obs
+}
+
+  # Young sample
+  ## (1) fixed
+for (i in 2) {
+  
+  model <- plm(
+    formula = as.formula(paste(ext_model)),
+    data = young_group, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors & number of observations
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  obs <- nobs(model)
+  
+  # assigning values to the table
+  table9[i, 5] <- y[1] %>% round(3)  
+  table9[i, 6] <- y[2] %>% round(5)    
+  table9[3, 5:6] <- obs
+}
+
+  ## (2) random 
+for (i in 2) {
+  
+  model <- plm(
+    formula = as.formula(paste(ext_model)),
+    data = young_group, index = c("Firm_id", "Year"), 
+    model = "random", effect = "twoways", 
+    random.method = "walhus")
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table9[i, 7] <- y[2] %>% round(3)    
+  table9[i, 8] <- y[2, 2] %>% round(3)   
+  table9[3, 7:8] <- obs
+}
+
+  # Old sample
+  ## (1) fixed
+for (i in 2) {
+  
+  model <- plm(
+    formula = as.formula(paste(ext_model)),
+    data = old_group, index = c("Firm_id", "Year"), 
+    model = "within", effect = "twoways", 
+    na.action = na.exclude)
+  
+  # robust standard errors & number of observations
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  obs <- nobs(model)
+  
+  # assigning values to the table
+  table9[i, 9] <- y[1] %>% round(3)  
+  table9[i, 10] <- y[2] %>% round(3) 
+  table9[3, 9:10] <- obs
+}
+
+  ## (2) random 
+for (i in 2) {
+  
+  model <- plm(
+    formula = as.formula(paste(ext_model)),
+    data = old_group, index = c("Firm_id", "Year"), 
+    model = "random", effect = "twoways", 
+    random.method = "walhus")
+  
+  # robust standard errors
+  y <- coeftest(model, vcov. = vcovHC, type = "HC1")
+  
+  # assigning values to the table
+  table9[i, 11] <- y[2] %>% round(3)    
+  table9[i, 12] <- y[2, 2] %>% round(3)    
+  table9[3, 11:12] <- obs
+}
+```
+
+**Translate into table**
+```{r}
+# Format table
+  # for loops to place robust standard errors below the corresponding coefficients
+for (i in 1:2) {
+  for (k in seq(1, 12, 2)) {
+    
+  table9[i, k] <- paste(
+    table9[i, k], "<br>(",
+    table9[i, k + 1], ")",
+    sep="")
+  }
+}
+
+  # remove duplicate rows displaying robust standard errors
+table9 <- table9[-seq(2, 12, 2)]
+
+
+  # naming rows & columns
+colnames(table9) <- rep(c("Fixed", "Random"), times = 3)
+rownames(table9) <- c("GI", "GI + Controls", "<b>Observations<b>")
+
+  # styling table
+table9 <- kable(
+  x = table9,
+  format = "html",
+  size = 10, escape = FALSE,
+  caption = "<b>TABLE 9: <i>Fixed Effects and Random Effects Comparison",
+  align = "c") %>%
+  kable_classic(full_width = F, html_font = "calibri", position = "left") %>%
+
+  # notify variable columns
+  add_header_above(c("", "Full sample" = 2, "Young" = 2, "Old" = 2), bold = TRUE) %>%
+
+  # notify variable rows
+  pack_rows("Baseline", 1, 1, bold = TRUE) %>%
+  pack_rows("Extended", 2, 2, bold = TRUE) %>%
+  
+  # footnotes for table 
+  footnote(general = "The table reports the Fixed Effects and Random Effects estimates. Robust standard errors are reported in parentheses. A variable is considered significant if the ratio between its coefficient and its standard error is equal to or greater than 2.",
+  footnote_as_chunk = TRUE)
+    
+  # save table
+save_kable(x = table9, file = "Table 9.png", zoom = 1.5)
+
+# print table
+table9
+```
+
+
+---
+
+# Section VI: Conclusions
+
+**Estimator comparison**
+
+  + **Pooled OLS**: The estimates of the dependent variable in the naive OLS regression of firm value on GI without any fixed effects are negative. However, the OLS model is very low fit and $\bar{R}^{2}$ increases tremendously when control variables are added into the baseline model ($\bar{R}^{2}_{baseline}$ = $0.08572$, $\bar{R}^{2}_{extended}$ = $0.6083$). This indeed confirms the existence of upward bias.
+  
+  + **Random Effects**: GI seems to not have any impact on the value of a biotech company. Only in the baseline model on the old sample that the estimate is significant positive. The Hausman test, however, is not in favor of this method. As a results, its results and inferences are considered less important than the Fixed Effects'.
+  
+  + **Fixed Effects**: Scientifically proved to be efficient in addressing unobervable heterogeneity, a type of OVB, Fixed Effects Model is appropriate to be employed in panel data. The outcomes obtained in robustness check are also supportive of this regressor, implying that this method should be preferred.
+
+  $\implies$ Fixed Effects Regression is an appropriate technique and its results are robust.
+  
+---
+
+**Hypothesis summary**
+
+  + **Hypothesis 1**: Rejected. GI does not inversely impact current value of biotech companies.
+  
+  + **Hypothesis 2**: Partly supported. GI can eventually generate favorable outcomes to businesses. However, this is only applicable to younger firms. 
+  
+  + **Hypothesis 3**: Supported. The effects of GI vary between firms of different age groups. Younger corporations are likely to benefit from GI whereas the older competitors experience no benefits. 
+  
+  $\implies$ It is essential to consider which age group a firm is in when evaluating the potential contribution of GI to its financial performance.
+
+---
+  
+**KEY FINDINGS**
+
+  + The impact of green innovation (GI) is not instantaneously visible. It takes at least a year for the effects to show up, if there are any. 
+  
+  + The estimates produced with the OLS regression tend to be upward biased, thus highly unreliable.
+  
+  + Compared to the naive Pooled OLS, Fixed Effects Regression works more efficiently in terms of addressing OVB. It helps get rid of biases caused by both observable and unobservable factors, thus guarantee causal inferences.
+   
+  + Lead and lag models produce different results. Regressions employing 1 and 2 year lags of GI demonstrate that the future value of a firm is independent of their today's investment decisions, regardless of their age. Conversely, all equations with 1 and 2-year leads of firm value confirm the constructive role of GI. However, this is only applicable to younger enterprises. 
+  
+  + Performance of longer-existing firms are unlikely to depend on their GI levels. Instead, other financial criteria, particularly leverage ratio and firm size, matter more to their long-term success.
+  
+  + Compared to the Random Effects, Fixed Effects are also more reliable. 
+
+  $\implies$ Estimates on variables of interest produced by the **Two-way Fixed Effects Models** evidence that eco-based technological development does not generate negative outcomes to biotechnology corporations. Under certain circumstances, it can even boost business performance.
+ 
+---
+
+# References
+
+Arnold, M. (2019, March 12). 10 Regression with Panel Data | Introduction to Econometrics with R. Econometrics-with-r.org. https://www.econometrics-with-r.org/10-rwpd.html
+
+Library of Statistical Techniques (LOST). Fixed Effects in Linear Regression. 
+https://lost-stats.github.io/Model_Estimation/OLS/fixed_effects_in_linear_regression.html#:~:text=Fixed%20effects%20is%20a%20statistical 
+Schweinberger, Martin. (2022). Fixed- and Mixed-Effects Regression Models in R. Brisbane: The University of Queensland.
+
+**Additional Links**
+https://slcladal.github.io/regression.html#Example_1:_Preposition_Use_across_Real-Time
+
+https://cran.r-project.org/web/packages/sjPlot/vignettes/tab_model_estimates.html
+
+https://clanfear.github.io/r_exposure_workshop/lectures/r3/r3_1/r_exposure_3_1_loops.html#42
+
+
+
+
+
+
+
+
+
+
+
+
